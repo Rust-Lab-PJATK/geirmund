@@ -1,111 +1,143 @@
-use candle_core::{CudaDevice, DType, Device, Tensor};
-use candle_transformers::models::llama::{Cache, Config, Llama as CandleLlama, LlamaConfig, LlamaEosToks};
-use tokenizers::Tokenizer;
-use anyhow::{Result, Error as E};
-use candle_core::backend::BackendDevice;
+use crate::{TextModel, TextModelConfig, TextModelFiles};
+use anyhow::{bail, Error as E, Result};
+use candle_core::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use crate::TextModel;
+use candle_transformers::models::llama::{
+    Cache, Config as CandleConfig, Llama as CandleLlama, LlamaConfig, LlamaEosToks,
+};
+use derive_more::Debug as DMDebug;
+use std::time::Instant;
+use tokenizers::Tokenizer;
 
+#[derive(DMDebug)]
 pub struct LLama {
-    pub device: Device,
-    pub data_type: DType,
-    pub max_tokens: usize,
+    pub text_model_config: TextModelConfig,
+    pub text_model_files: TextModelFiles,
+    pub llama_internals: Option<LlamaInternals>,
+}
 
-    pub config: Config,
+#[derive(DMDebug)]
+pub struct LlamaInternals {
+    pub inner_config: CandleConfig,
     pub inner_model: CandleLlama,
     pub cache: Cache,
     pub tokenizer: Tokenizer,
+    #[debug(skip)]
+    pub logits_processor: LogitsProcessor,
 }
 
 impl LLama {
-    pub fn new(
-        config_file: &str,
-        weight_files: &[&str],
-        tokenizer_file: &str,
-        data_type: DType,
-        cuda_device_id: Option<usize>,
-        max_tokens: Option<usize>,
-    ) -> Result<Self > {
-        let device = if let Some(id) = cuda_device_id {
-            Device::Cuda(CudaDevice::new(id)?)
-        } else {
-            Device::Cpu
-        };
-
-        let config = Self::load_config(config_file)?;
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(weight_files, data_type, &device)?
-        };
-        let inner_model = CandleLlama::load(vb, &config)?;
-        let cache = Cache::new(true, data_type, &config, &device)?;
-        let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(E::msg)?;
-
-        let max_tokens = if let Some(mt) = max_tokens {
-            mt
-        } else {
-            512
-        };
-
-        Ok(
-            Self {
-                config,
-                device,
-                data_type,
-                max_tokens,
-                inner_model,
-                cache,
-                tokenizer,
-            }
-        )
+    pub fn new(text_model_config: TextModelConfig, text_model_files: TextModelFiles) -> Self {
+        Self {
+            text_model_config,
+            text_model_files,
+            llama_internals: None,
+        }
     }
 
-    fn load_config(filename: &str) -> Result<Config> {
+    fn load_inner_config(filename: &str) -> Result<CandleConfig> {
         let config = std::fs::read_to_string(filename)?;
         let config: LlamaConfig = serde_json::from_str(&config)?;
         Ok(config.into_config(false))
     }
-}
 
-impl Default for LLama {
-    fn default() -> Self {
-        Self::new(
-            "worker/llama3v2-1b/config.json",
-            &["worker/llama3v2-1b/model.safetensors"],
-            "worker/llama3v2-1b/tokenizer.json",
-            DType::F16,
-            Some(0),
-            None,
-        ).expect("Failed to load Llama")
+    fn make_logits_processor(&self) -> LogitsProcessor {
+        let sampling = if self.text_model_config.temperature <= 0. {
+            Sampling::ArgMax
+        } else {
+            Sampling::TopKThenTopP {
+                k: self.text_model_config.top_k,
+                p: self.text_model_config.top_p,
+                temperature: self.text_model_config.temperature,
+            }
+        };
+        LogitsProcessor::from_sampling(1337, sampling)
     }
 }
 
 impl TextModel for LLama {
+    fn load(&mut self) -> Result<()> {
+        println!("Loading Llama...");
+        let start_time = Instant::now();
+
+        let inner_config = Self::load_inner_config(self.text_model_files.inner_config_filename)?;
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                self.text_model_files.weight_filenames,
+                self.text_model_config.data_type,
+                &self.text_model_config.device,
+            )?
+        };
+        let inner_model = CandleLlama::load(vb, &inner_config)?;
+        let cache = Cache::new(
+            true,
+            self.text_model_config.data_type,
+            &inner_config,
+            &self.text_model_config.device,
+        )?;
+        let tokenizer =
+            Tokenizer::from_file(self.text_model_files.tokenizer_filename).map_err(E::msg)?;
+        let logits_processor = self.make_logits_processor();
+
+        println!("Loaded in {}ms", start_time.elapsed().as_millis());
+        self.llama_internals = Some(LlamaInternals {
+            inner_config,
+            inner_model,
+            cache,
+            tokenizer,
+            logits_processor,
+        });
+        Ok(())
+    }
+
+    #[allow(unreachable_code)]
     fn generate(&mut self, prompt: String) -> Result<String> {
-        let mut tokens = self.tokenizer
+        let llama_internals = if let Some(ref mut li) = self.llama_internals {
+            li
+        } else {
+            !bail!("LLama must be loaded before generating")
+        };
+
+        let mut tokens = llama_internals
+            .tokenizer
             .encode(prompt, true)
             .map_err(E::msg)?
             .get_ids()
             .to_vec();
-        let mut logits_processor = LogitsProcessor::from_sampling(1337, Sampling::ArgMax);
 
         let mut idx_pos = 0;
-        for idx in 0..self.max_tokens {
-            let (context_size, context_index) = if self.cache.use_kv_cache && idx > 0 {
+        for idx in 0..self.text_model_config.max_tokens {
+            let (context_size, context_index) = if llama_internals.cache.use_kv_cache && idx > 0 {
                 (1, idx_pos)
             } else {
                 (tokens.len(), 0)
             };
 
             let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
-            let logits = self.inner_model.forward(&input, context_index, &mut self.cache)?.squeeze(0)?;
-            idx_pos += 1;
+            let input = Tensor::new(ctxt, &self.text_model_config.device)?.unsqueeze(0)?;
+            let logits = llama_internals
+                .inner_model
+                .forward(&input, context_index, &mut llama_internals.cache)?
+                .squeeze(0)?;
+            let logits = if self.text_model_config.repeat_penalty == 1. {
+                logits
+            } else {
+                let start_at = tokens
+                    .len()
+                    .saturating_sub(self.text_model_config.repeat_last_n);
+                candle_transformers::utils::apply_repeat_penalty(
+                    &logits,
+                    self.text_model_config.repeat_penalty,
+                    &tokens[start_at..],
+                )?
+            };
+            idx_pos += ctxt.len();
 
-            let next_token = logits_processor.sample(&logits)?;
+            let next_token = llama_internals.logits_processor.sample(&logits)?;
             tokens.push(next_token);
 
-            match self.config.eos_token_id {
+            match llama_internals.inner_config.eos_token_id {
                 Some(LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
                     break;
                 }
@@ -116,10 +148,17 @@ impl TextModel for LLama {
             }
         }
 
-        Ok(
-            self.tokenizer
-                .decode(tokens.as_slice(), true)
-                .map_err(E::msg)?
-        )
+        Ok(llama_internals
+            .tokenizer
+            .decode(tokens.as_slice(), true)
+            .map_err(E::msg)?)
+    }
+
+    fn config(&self) -> &TextModelConfig {
+        &self.text_model_config
+    }
+
+    fn filenames(&self) -> &TextModelFiles {
+        &self.text_model_files
     }
 }
