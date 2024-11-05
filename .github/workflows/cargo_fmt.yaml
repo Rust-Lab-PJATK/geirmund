@@ -13,3 +13,15 @@ jobs:
 
       - name: Run formatter on project `master`
         run: cargo fmt --all
+
+      - name: GIT commit and push docs
+        env: 
+          CI_COMMIT_MESSAGE: CI auto-formatter
+          CI_COMMIT_AUTHOR: CI
+        run: |
+          git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
+          git config --global user.email "{{ github.actor }}@users.noreply.github.com"
+          git add docs
+          git commit -m "${{ env.CI_COMMIT_MESSAGE }}"
+          git push
+       
