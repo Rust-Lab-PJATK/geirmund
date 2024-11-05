@@ -91,12 +91,11 @@ impl TextModel for LLama {
         Ok(())
     }
 
-    #[allow(unreachable_code)]
     fn generate(&mut self, prompt: String) -> Result<String> {
         let llama_internals = if let Some(ref mut li) = self.llama_internals {
             li
         } else {
-            !bail!("LLama must be loaded before generating")
+            bail!("LLama must be loaded before generating")
         };
 
         let mut tokens = llama_internals
