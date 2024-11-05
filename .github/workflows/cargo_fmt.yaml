@@ -2,7 +2,7 @@ name: cargo fmt on push
 run-name: ${{ github.actor }} has triggered a cargo fmt, doin' it now!
 on: [push]
 jobs:
-  check-and-format:
+  format:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -15,6 +15,7 @@ jobs:
         run: cargo fmt --all
 
       - name: GIT commit and push docs
+        continue-on-error: true
         env: 
           CI_COMMIT_MESSAGE: CI auto-formatter
           CI_COMMIT_AUTHOR: CI
