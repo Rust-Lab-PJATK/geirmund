@@ -1,6 +1,5 @@
 use anyhow::Result;
-use candle_core::backend::BackendDevice;
-use candle_core::{CudaDevice, DType, Device};
+use candle_core::{DType, Device};
 
 pub mod llama;
 
@@ -91,7 +90,7 @@ impl Default for TextModelConfigBuilder {
     fn default() -> Self {
         Self {
             text_model_config: TextModelConfig {
-                device: Device::Cuda(CudaDevice::new(0).expect("Cuda device not found")),
+                device: Device::Cpu,
                 data_type: DType::F16,
                 max_tokens: 512,
                 temperature: 0.8,

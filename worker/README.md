@@ -4,4 +4,5 @@
 
 ## Usage info
 1. If you don't have CUDA device, you should initialize model with `cuda_device_id` set to `None`
-2. If you encounter problems during compilation of candle regarding CUDA try to install `nvidia-cuda-toolkit`
+2. If you want CUDA support you should build project with `cargo build --features cuda`
+3. If you encounter problems during compilation of candle regarding CUDA try to install `nvidia-cuda-toolkit`
