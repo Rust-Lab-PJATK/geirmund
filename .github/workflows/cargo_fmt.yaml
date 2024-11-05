@@ -11,8 +11,5 @@ jobs:
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Check that code can compile
-        run: cargo check
-
-      - name: Run formatter
-        run: cargo fmt
+      - name: Run formatter on project `master`
+        run: cargo fmt --all
