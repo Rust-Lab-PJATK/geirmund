@@ -3,7 +3,7 @@ use prost::{Message, Oneof};
 #[derive(Message)]
 pub struct Packet {
     #[prost(oneof = "WorkerMessage", tags = "1")]
-    pub cmd: Option<WorkerMessage>,
+    pub msg: Option<WorkerMessage>,
 }
 
 #[derive(Oneof)]
@@ -22,8 +22,8 @@ pub struct Response {
 }
 
 impl Packet {
-    pub fn new(cmd: WorkerMessage) -> Self {
-        Self { cmd: Some(cmd) }
+    pub fn new(msg: WorkerMessage) -> Self {
+        Self { msg: Some(msg) }
     }
 }
 

@@ -1,22 +1,43 @@
 use anyhow::Result;
-use std::time::Instant;
+use candle_core::backend::BackendDevice;
+use candle_core::{CudaDevice, Device};
+use clap::Parser;
+use proto::master::MasterMessage;
+use worker::cli::Args;
+use worker::client::Client;
 use worker::llama::LLama;
 use worker::{TextModel, TextModelConfig, TextModelFiles};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let device = if let Some(cuda_device) = args.cuda_device {
+        Device::Cuda(CudaDevice::new(cuda_device)?)
+    } else {
+        Device::Cpu
+    };
+
     let mut model = LLama::new(
-        TextModelConfig::default_builder().build(),
-        TextModelFiles::new(
-            "worker/llama3v2-1b/config.json",
-            "worker/llama3v2-1b/tokenizer.json",
-            &["worker/llama3v2-1b/model.safetensors"],
-        ),
+        TextModelConfig::default_builder()
+            .with_device(device)
+            .build(),
+        TextModelFiles::new(args.config_file, args.tokenizer_file, args.weight_files),
     );
-    model.load()?;
 
-    let start_time = Instant::now();
-    let result = model.generate("Write me a poem".to_string())?;
-    println!("{}\nin {}ms", result, start_time.elapsed().as_millis());
+    let mut client = Client::connect(format!("{}:{}", args.master_host, args.master_port)).await?;
 
-    Ok(())
+    loop {
+        if let Some(packet) = client.connection.read_packet().await? {
+            match packet.msg {
+                Some(MasterMessage::LoadCommand(_)) => model.load()?,
+                Some(MasterMessage::GenerateCommand(generate)) => {
+                    println!("Generate prompt: {}", generate.prompt);
+                    let answer = model.generate(generate.prompt)?;
+                    println!("Generate answer: {}", answer);
+                }
+                None => {}
+            }
+        }
+    }
 }

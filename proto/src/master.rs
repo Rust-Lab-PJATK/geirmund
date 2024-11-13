@@ -3,7 +3,7 @@ use prost::{Enumeration, Message, Oneof};
 #[derive(Message)]
 pub struct Packet {
     #[prost(oneof = "MasterMessage", tags = "1, 2")]
-    pub cmd: Option<MasterMessage>,
+    pub msg: Option<MasterMessage>,
 }
 
 #[derive(Oneof)]
@@ -40,8 +40,8 @@ pub struct Generate {
 }
 
 impl Packet {
-    pub fn new(cmd: MasterMessage) -> Self {
-        Self { cmd: Some(cmd) }
+    pub fn new(msg: MasterMessage) -> Self {
+        Self { msg: Some(msg) }
     }
 }
 
@@ -49,6 +49,16 @@ impl Load {
     pub fn new(model_type: ModelType) -> Self {
         Self {
             r#type: model_type as i32,
+        }
+    }
+}
+
+impl Generate {
+    pub fn new(id: i32, model_type: ModelType, prompt: String) -> Self {
+        Self {
+            id,
+            r#type: model_type as i32,
+            prompt,
         }
     }
 }

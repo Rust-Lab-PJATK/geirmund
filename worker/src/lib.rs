@@ -1,6 +1,8 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
 
+pub mod cli;
+pub mod client;
 pub mod llama;
 
 pub trait TextModel {
@@ -29,9 +31,9 @@ pub struct TextModelConfigBuilder {
 
 #[derive(Debug)]
 pub struct TextModelFiles {
-    pub inner_config_filename: &'static str,
-    pub tokenizer_filename: &'static str,
-    pub weight_filenames: &'static [&'static str],
+    pub inner_config_filename: String,
+    pub tokenizer_filename: String,
+    pub weight_filenames: Vec<String>,
 }
 
 impl TextModelConfig {
@@ -105,9 +107,9 @@ impl Default for TextModelConfigBuilder {
 
 impl TextModelFiles {
     pub fn new(
-        inner_config_filename: &'static str,
-        tokenizer_filename: &'static str,
-        weight_filenames: &'static [&'static str],
+        inner_config_filename: String,
+        tokenizer_filename: String,
+        weight_filenames: Vec<String>,
     ) -> Self {
         Self {
             inner_config_filename,

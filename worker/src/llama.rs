@@ -61,23 +61,23 @@ impl TextModel for LLama {
         println!("Loading Llama...");
         let start_time = Instant::now();
 
-        let inner_config = Self::load_inner_config(self.text_model_files.inner_config_filename)?;
+        let inner_config = Self::load_inner_config(&self.text_model_files.inner_config_filename)?;
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                self.text_model_files.weight_filenames,
+                &self.text_model_files.weight_filenames,
                 self.text_model_config.data_type,
                 &self.text_model_config.device,
             )?
         };
         let inner_model = CandleLlama::load(vb, &inner_config)?;
         let cache = Cache::new(
-            true,
+            false,
             self.text_model_config.data_type,
             &inner_config,
             &self.text_model_config.device,
         )?;
         let tokenizer =
-            Tokenizer::from_file(self.text_model_files.tokenizer_filename).map_err(E::msg)?;
+            Tokenizer::from_file(&self.text_model_files.tokenizer_filename).map_err(E::msg)?;
         let logits_processor = self.make_logits_processor();
 
         println!("Loaded in {}ms", start_time.elapsed().as_millis());
