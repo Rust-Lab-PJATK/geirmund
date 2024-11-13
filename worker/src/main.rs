@@ -22,10 +22,10 @@ async fn main() -> Result<()> {
         TextModelConfig::default_builder()
             .with_device(device)
             .build(),
-        TextModelFiles::new(args.config_file, args.tokenizer_file, args.weight_files),
+        TextModelFiles::new(args.config, args.tokenizer, args.weights),
     );
 
-    let mut client = Client::connect(format!("{}:{}", args.master_host, args.master_port)).await?;
+    let mut client = Client::connect(format!("{}:{}", args.host, args.port)).await?;
 
     loop {
         if let Some(packet) = client.connection.read_packet().await? {
