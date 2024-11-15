@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["master", "proto", "worker"]
+members = ["master", "optimus", "proto", "worker"]
 
 [profile.dev]
 opt-level = 0
