@@ -6,7 +6,8 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use futures::{FutureExt, StreamExt};
-use std::{fmt::Display, io::Write as IoWrite, string::FromUtf8Error};
+use proto::master::ModelType;
+use std::{borrow::Borrow, fmt::Display, io::Write as IoWrite, rc::Rc, string::FromUtf8Error};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -40,8 +41,8 @@ impl Display for TuiMenuOption {
 impl Display for TuiChooseModelMenuOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TuiChooseModelMenuOption::SelectModel(model) => match model {
-                ModelType::Llama3v2_1B => write!(f, "{model}")?,
+            TuiChooseModelMenuOption::SelectModel(model) => match model.borrow() {
+                proto::master::ModelType::Llama3v2_1B => write!(f, "Llama v3.2 1B")?,
             },
             TuiChooseModelMenuOption::Exit => {
                 write!(f, "Do not choose any model, go back to main menu.")?;
@@ -52,32 +53,9 @@ impl Display for TuiChooseModelMenuOption {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ModelType {
-    Llama3v2_1B,
-}
-
-impl std::fmt::Display for ModelType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Llama3v2_1B => write!(f, "Llama v3.2 1B")?,
-        }
-
-        Ok(())
-    }
-}
-
-impl Into<proto::master::ModelType> for ModelType {
-    fn into(self) -> proto::master::ModelType {
-        match self {
-            Self::Llama3v2_1B => proto::master::ModelType::Llama3v2_1B,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TuiChooseModelMenuOption {
-    SelectModel(ModelType),
+    SelectModel(std::rc::Rc<proto::master::ModelType>),
     Exit,
 }
 
@@ -223,7 +201,7 @@ impl Tui {
         cancellation_token: CancellationToken,
     ) -> Result<TuiChooseModelMenuOption, TuiError> {
         let opts = vec![
-            TuiChooseModelMenuOption::SelectModel(ModelType::Llama3v2_1B),
+            TuiChooseModelMenuOption::SelectModel(Rc::new(proto::master::ModelType::Llama3v2_1B)),
             TuiChooseModelMenuOption::Exit,
         ];
 
@@ -233,7 +211,7 @@ impl Tui {
         )
         .await?
         {
-            Some(opt_index) => Ok(opts[opt_index]),
+            Some(opt_index) => Ok(opts[opt_index].clone()),
             None => Ok(TuiChooseModelMenuOption::Exit),
         }
     }
@@ -253,7 +231,7 @@ impl Tui {
                 TuiScreen::ChooseModel => {
                     match Self::launch_choose_model_menu(cancellation_token.clone()).await? {
                         TuiChooseModelMenuOption::SelectModel(model) => {
-                            panic!("Chosen model: {model}");
+                            panic!("Chosen model: {:?}", model.clone());
                         }
                         TuiChooseModelMenuOption::Exit => tui_screen = TuiScreen::Menu,
                     }
