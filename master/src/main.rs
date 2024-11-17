@@ -1,5 +1,6 @@
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tui::TuiError;
 
 mod tui;
@@ -42,7 +43,16 @@ mod server {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // logs are currently going to a file
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open("master.log")
+        .unwrap();
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(file))
+        .init();
 
     // disable raw mode, because when it is enabled it disables ctrl+c handling
     _ = crossterm::terminal::disable_raw_mode();
@@ -67,11 +77,13 @@ async fn main() {
     if let Err(e) = tui_fut.await {
         if e != TuiError::Cancelled {
             tracing::error!("{}", e);
+            eprintln!("Error occured within TUI: {e}");
         }
     }
 
     if let Err(e) = server_fut.await {
         tracing::error!("{}", e);
+        eprintln!("Error occured within tcp server: {e}");
     }
 
     tracing::info!("The tcp listener has been closed.");
