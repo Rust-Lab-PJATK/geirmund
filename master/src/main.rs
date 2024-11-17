@@ -7,14 +7,16 @@ mod server {
 
     #[derive(Error, Debug, Clone)]
     pub enum StartServerError {
-        #[error("failed to bind the tcp listener to the address {0}")]
-        BindTcpListenerError(String),
+        #[error("failed to bind the tcp listener to the address {0}; {1}")]
+        BindTcpListenerError(String, String),
     }
 
     pub async fn start(cancellation_token: CancellationToken) -> Result<(), StartServerError> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
             .await
-            .map_err(|err| StartServerError::BindTcpListenerError(err.to_string()))?;
+            .map_err(|err| {
+                StartServerError::BindTcpListenerError("0.0.0.0:8080".to_string(), err.to_string())
+            })?;
 
         tracing::info!("The server has been bind on port 8080 for all incoming hosts!");
 
