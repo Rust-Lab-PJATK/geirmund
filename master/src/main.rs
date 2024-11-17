@@ -1,5 +1,6 @@
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
+use tui::TuiError;
 
 mod tui;
 
@@ -33,8 +34,6 @@ mod server {
                 },
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => continue,
             };
-
-            tracing::info!("{:?}", accepted_token)
         }
 
         Ok(())
@@ -45,20 +44,31 @@ mod server {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    // disable raw mode, because when it is enabled it disables ctrl+c handling
+    _ = crossterm::terminal::disable_raw_mode();
+
     let cancellation_token = CancellationToken::new();
 
     let server_fut = Box::pin(server::start(cancellation_token.clone())).shared();
-    let signal_fut = Box::pin(async {
+    let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
         _ = tokio::signal::ctrl_c().await;
-    })
+    }))
     .shared();
+    let tui_fut = Box::pin(tui::Tui::run(cancellation_token.clone())).shared();
 
     tokio::select! {
         _ = server_fut.clone() => {},
-        _ = signal_fut.clone() => {}
+        _ = signal_fut.clone() => {},
+        _ = tui_fut.clone() => {},
     }
 
     cancellation_token.cancel();
+
+    if let Err(e) = tui_fut.await {
+        if e != TuiError::Cancelled {
+            tracing::error!("{}", e);
+        }
+    }
 
     if let Err(e) = server_fut.await {
         tracing::error!("{}", e);

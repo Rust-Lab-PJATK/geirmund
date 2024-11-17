@@ -1,13 +1,15 @@
 use crossterm::{
     cursor::MoveTo,
-    event::{KeyCode, KeyEventKind},
+    event::{Event, EventStream as CrosstermEventStream, KeyCode, KeyEvent, KeyEventKind},
     execute,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{Clear, ClearType},
 };
+use futures::{FutureExt, StreamExt};
 use std::{fmt::Write, io::BufWriter, thread::current};
 use std::{io::Write as IoWrite, string::FromUtf8Error};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 pub struct Tui;
 
@@ -28,13 +30,22 @@ impl Into<String> for TuiMenuOption {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum TuiError {
     #[error("failed to convert vector of u8 to string: {0}")]
     U8ToStringConversionError(#[from] FromUtf8Error),
 
     #[error("io error occured: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
+
+    #[error("cancel signal has been received")]
+    Cancelled,
+}
+
+impl From<std::io::Error> for TuiError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IoError(value.to_string())
+    }
 }
 
 pub enum TuiKeypress {
@@ -84,7 +95,10 @@ impl Tui {
         Ok(())
     }
 
-    pub async fn menu() -> Result<TuiMenuOption, TuiError> {
+    pub async fn menu(cancellation_token: CancellationToken) -> Result<TuiMenuOption, TuiError> {
+        // this function does not do any long-hanging stuff,
+        // so it does not check for token cancellation
+
         let all_opts: Vec<TuiMenuOption> =
             vec![TuiMenuOption::LoadModel, TuiMenuOption::GenerateOutput];
 
@@ -93,7 +107,7 @@ impl Tui {
         Self::rewrite_menu(all_opts[current_opt_index])?;
 
         loop {
-            match Self::listen_for_menu_keys().await? {
+            match Self::listen_for_menu_keys(cancellation_token.clone()).await? {
                 TuiKeypress::UpArrow => {
                     if current_opt_index == all_opts.len() - 1 {
                         current_opt_index = 0;
@@ -112,34 +126,40 @@ impl Tui {
         }
     }
 
-    pub async fn listen_for_menu_keys() -> Result<TuiKeypress, TuiError> {
-        use crossterm::event::{poll, read, Event};
-        use std::time::Duration;
+    pub async fn listen_for_menu_keys(
+        cancellation_token: CancellationToken,
+    ) -> Result<TuiKeypress, TuiError> {
+        let mut crossterm_ev_stream = CrosstermEventStream::new();
 
         loop {
-            if poll(Duration::from_millis(500))? {
-                match read()? {
-                    Event::Key(kev) => {
-                        if kev.kind != KeyEventKind::Press {
-                            continue;
-                        }
+            let mut crossterm_ev_stream_future = crossterm_ev_stream.next().fuse();
 
-                        match kev.code {
-                            KeyCode::Up => return Ok(TuiKeypress::UpArrow),
-                            KeyCode::Down => return Ok(TuiKeypress::DownArrow),
-                            KeyCode::Esc => return Ok(TuiKeypress::Escape),
-                            KeyCode::Enter => return Ok(TuiKeypress::Enter),
-                            _ => {}
-                        };
-                    }
-                    _ => {}
-                };
-            }
+            tokio::select! {
+                () = cancellation_token.cancelled() => {
+                    return Err(TuiError::Cancelled);
+                },
+                value = &mut crossterm_ev_stream_future => {
+                    match value {
+                        Some(Ok(crossterm::event::Event::Key(kev))) => {
+                            if kev.kind == KeyEventKind::Press {
+                                match kev.code {
+                                    KeyCode::Up => return Ok(TuiKeypress::UpArrow),
+                                    KeyCode::Down => return Ok(TuiKeypress::DownArrow),
+                                    KeyCode::Esc => return Ok(TuiKeypress::Escape),
+                                    KeyCode::Enter => return Ok(TuiKeypress::Enter),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    };
+                },
+            };
         }
     }
 
-    pub async fn run() -> Result<(), TuiError> {
-        let menu = Self::menu().await?;
+    pub async fn run(cancellation_token: CancellationToken) -> Result<(), TuiError> {
+        let menu_result = Self::menu(cancellation_token.clone()).await?;
 
         Ok(())
     }
