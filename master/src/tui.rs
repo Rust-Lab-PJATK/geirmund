@@ -13,6 +13,12 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Tui;
 
+pub enum TuiScreen {
+    Menu,
+    ChooseModel,
+    WritePrompt,
+}
+
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum TuiMenuOption {
     LoadModel,
@@ -159,8 +165,17 @@ impl Tui {
     }
 
     pub async fn run(cancellation_token: CancellationToken) -> Result<(), TuiError> {
-        let menu_result = Self::menu(cancellation_token.clone()).await?;
+        let mut tui_screen = TuiScreen::Menu;
 
-        Ok(())
+        loop {
+            match tui_screen {
+                TuiScreen::Menu => match Self::menu(cancellation_token.clone()).await? {
+                    TuiMenuOption::Exit => return Ok(()),
+                    TuiMenuOption::GenerateOutput => tui_screen = TuiScreen::WritePrompt,
+                    TuiMenuOption::LoadModel => tui_screen = TuiScreen::ChooseModel,
+                },
+                _ => unimplemented!(),
+            }
+        }
     }
 }
