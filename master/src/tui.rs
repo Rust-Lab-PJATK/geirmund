@@ -1,13 +1,12 @@
 use crossterm::{
     cursor::MoveTo,
-    event::{Event, EventStream as CrosstermEventStream, KeyCode, KeyEvent, KeyEventKind},
+    event::{EventStream as CrosstermEventStream, KeyCode, KeyEventKind},
     execute,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{Clear, ClearType},
 };
 use futures::{FutureExt, StreamExt};
-use std::{fmt::Write, io::BufWriter, thread::current};
-use std::{io::Write as IoWrite, string::FromUtf8Error};
+use std::{fmt::Display, io::Write as IoWrite, string::FromUtf8Error};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -26,14 +25,60 @@ pub enum TuiMenuOption {
     Exit,
 }
 
-impl Into<String> for TuiMenuOption {
-    fn into(self) -> String {
+impl Display for TuiMenuOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::LoadModel => String::from("Load model"),
-            Self::GenerateOutput => String::from("Generate output from model"),
-            Self::Exit => String::from("Close the program"),
+            Self::LoadModel => write!(f, "Load model")?,
+            Self::GenerateOutput => write!(f, "Generate output from model")?,
+            Self::Exit => write!(f, "Close the program")?,
+        };
+
+        Ok(())
+    }
+}
+
+impl Display for TuiChooseModelMenuOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TuiChooseModelMenuOption::SelectModel(model) => match model {
+                ModelType::Llama3v2_1B => write!(f, "{model}")?,
+            },
+            TuiChooseModelMenuOption::Exit => {
+                write!(f, "Do not choose any model, go back to main menu.")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ModelType {
+    Llama3v2_1B,
+}
+
+impl std::fmt::Display for ModelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Llama3v2_1B => write!(f, "Llama v3.2 1B")?,
+        }
+
+        Ok(())
+    }
+}
+
+impl Into<proto::master::ModelType> for ModelType {
+    fn into(self) -> proto::master::ModelType {
+        match self {
+            Self::Llama3v2_1B => proto::master::ModelType::Llama3v2_1B,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TuiChooseModelMenuOption {
+    SelectModel(ModelType),
+    Exit,
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -62,7 +107,7 @@ pub enum TuiKeypress {
 }
 
 impl Tui {
-    fn rewrite_menu(current_opt: TuiMenuOption) -> Result<(), TuiError> {
+    fn rewrite_menu(all_opts: &Vec<String>, current_opt: usize) -> Result<(), TuiError> {
         execute!(
             std::io::stdout(),
             Clear(ClearType::FromCursorUp),
@@ -75,13 +120,8 @@ impl Tui {
         )?;
         writeln!(std::io::stdout())?;
 
-        let all_opts: Vec<TuiMenuOption> =
-            vec![TuiMenuOption::LoadModel, TuiMenuOption::GenerateOutput];
-
-        for opt in all_opts {
-            let stringified_opt: String = opt.into();
-
-            let (foreground, background) = if current_opt == opt {
+        for (opt_index, opt_val) in all_opts.iter().enumerate() {
+            let (foreground, background) = if current_opt == opt_index {
                 (Color::Black, Color::White)
             } else {
                 (Color::White, Color::Black)
@@ -91,7 +131,7 @@ impl Tui {
                 std::io::stdout(),
                 SetForegroundColor(foreground),
                 SetBackgroundColor(background),
-                Print(stringified_opt),
+                Print(opt_val),
                 ResetColor
             )?;
 
@@ -101,16 +141,15 @@ impl Tui {
         Ok(())
     }
 
-    pub async fn menu(cancellation_token: CancellationToken) -> Result<TuiMenuOption, TuiError> {
+    pub async fn display_option_menu(
+        all_opts: &Vec<String>,
+        cancellation_token: CancellationToken,
+    ) -> Result<Option<usize>, TuiError> {
         // this function does not do any long-hanging stuff,
-        // so it does not check for token cancellation
-
-        let all_opts: Vec<TuiMenuOption> =
-            vec![TuiMenuOption::LoadModel, TuiMenuOption::GenerateOutput];
-
+        // so it does not check for token cancellation.
         let mut current_opt_index = 0;
 
-        Self::rewrite_menu(all_opts[current_opt_index])?;
+        Self::rewrite_menu(all_opts, current_opt_index)?;
 
         loop {
             match Self::listen_for_menu_keys(cancellation_token.clone()).await? {
@@ -124,11 +163,11 @@ impl Tui {
                         current_opt_index = all_opts.len() - 1;
                     }
                 }
-                TuiKeypress::Enter => return Ok(all_opts[current_opt_index]),
-                TuiKeypress::Escape => return Ok(TuiMenuOption::Exit),
+                TuiKeypress::Enter => return Ok(Some(current_opt_index)),
+                TuiKeypress::Escape => return Ok(None),
             };
 
-            Self::rewrite_menu(all_opts[current_opt_index])?;
+            Self::rewrite_menu(all_opts, current_opt_index)?;
         }
     }
 
@@ -164,16 +203,61 @@ impl Tui {
         }
     }
 
+    async fn launch_main_menu(
+        cancellation_token: CancellationToken,
+    ) -> Result<TuiMenuOption, TuiError> {
+        let opts = vec![TuiMenuOption::LoadModel, TuiMenuOption::GenerateOutput];
+
+        match Self::display_option_menu(
+            &opts.iter().map(|opt| opt.to_string()).collect(),
+            cancellation_token,
+        )
+        .await?
+        {
+            Some(opt_index) => Ok(opts[opt_index]),
+            None => Ok(TuiMenuOption::Exit),
+        }
+    }
+
+    async fn launch_choose_model_menu(
+        cancellation_token: CancellationToken,
+    ) -> Result<TuiChooseModelMenuOption, TuiError> {
+        let opts = vec![
+            TuiChooseModelMenuOption::SelectModel(ModelType::Llama3v2_1B),
+            TuiChooseModelMenuOption::Exit,
+        ];
+
+        match Self::display_option_menu(
+            &opts.iter().map(|opt| opt.to_string()).collect(),
+            cancellation_token,
+        )
+        .await?
+        {
+            Some(opt_index) => Ok(opts[opt_index]),
+            None => Ok(TuiChooseModelMenuOption::Exit),
+        }
+    }
+
     pub async fn run(cancellation_token: CancellationToken) -> Result<(), TuiError> {
         let mut tui_screen = TuiScreen::Menu;
 
         loop {
             match tui_screen {
-                TuiScreen::Menu => match Self::menu(cancellation_token.clone()).await? {
-                    TuiMenuOption::Exit => return Ok(()),
-                    TuiMenuOption::GenerateOutput => tui_screen = TuiScreen::WritePrompt,
-                    TuiMenuOption::LoadModel => tui_screen = TuiScreen::ChooseModel,
-                },
+                TuiScreen::Menu => {
+                    match Self::launch_main_menu(cancellation_token.clone()).await? {
+                        TuiMenuOption::Exit => return Ok(()),
+                        TuiMenuOption::GenerateOutput => tui_screen = TuiScreen::WritePrompt,
+                        TuiMenuOption::LoadModel => tui_screen = TuiScreen::ChooseModel,
+                    }
+                }
+                TuiScreen::ChooseModel => {
+                    match Self::launch_choose_model_menu(cancellation_token.clone()).await? {
+                        TuiChooseModelMenuOption::SelectModel(model) => {
+                            panic!("Chosen model: {model}");
+                        }
+                        TuiChooseModelMenuOption::Exit => tui_screen = TuiScreen::Menu,
+                    }
+                }
                 _ => unimplemented!(),
             }
         }
