@@ -1,6 +1,8 @@
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
+mod tui;
+
 mod server {
     use thiserror::Error;
     use tokio_util::sync::CancellationToken;
