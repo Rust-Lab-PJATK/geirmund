@@ -8,32 +8,27 @@ use clap::Parser;
 )]
 pub struct Args {
     #[arg(
-        short = 'H', 
-        long, 
+        short = 'H',
+        long,
         default_value = "localhost",
         help = "Master server host"
     )]
     pub host: String,
 
-    #[arg(
-        short, 
-        long, 
-        default_value = "3000",
-        help = "Master server port"
-    )]
+    #[arg(short, long, default_value = "3000", help = "Master server port")]
     pub port: usize,
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         default_value = "llama3v2-1b/config.json",
         help = "Path for json config file"
     )]
     pub config: String,
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         default_value = "llama3v2-1b/tokenizer.json",
         help = "Path for json tokenizer file"
     )]
@@ -53,7 +48,7 @@ pub struct Args {
     #[arg(
         short = 'd',
         long,
-        help = "Optional setting for cuda support (starting from 0)",
+        help = "Optional setting for cuda support (starting from 0)"
     )]
     pub cuda_device: Option<usize>,
 }

@@ -1,18 +1,36 @@
 use anyhow::Result;
 use candle_core::{DType, Device};
+use std::ops::Deref;
+use std::sync::Arc;
+use tokio::sync::{Mutex, MutexGuard};
 
 pub mod cli;
 pub mod client;
 pub mod llama;
 
-pub trait TextModel {
-    fn load(&mut self) -> Result<()>;
+pub trait TextModel
+where
+    Self: Send,
+{
+    fn new(
+        text_model_config: Arc<TextModelConfig>,
+        text_model_files: Arc<TextModelFiles>,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+
     fn generate(&mut self, prompt: String) -> Result<String>;
+
     fn config(&self) -> &TextModelConfig;
+
     fn filenames(&self) -> &TextModelFiles;
 }
 
-#[derive(Debug)]
+type OptionalModel = Option<Box<dyn TextModel>>;
+type Guard = Mutex<OptionalModel>;
+pub struct TextModelGuard(Guard);
+
+#[derive(Debug, Clone)]
 pub struct TextModelConfig {
     pub device: Device,
     pub data_type: DType,
@@ -29,11 +47,43 @@ pub struct TextModelConfigBuilder {
     text_model_config: TextModelConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TextModelFiles {
     pub inner_config_filename: String,
     pub tokenizer_filename: String,
     pub weight_filenames: Vec<String>,
+}
+
+impl TextModelGuard {
+    pub fn with_value(value: Option<Box<(dyn TextModel)>>) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    pub fn empty() -> Self {
+        Self::with_value(None)
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn lock_now(&self) -> Result<MutexGuard<OptionalModel>> {
+        match self.try_lock() {
+            Ok(lock) => {
+                tracing::debug!("Locking model");
+                Ok(lock)
+            }
+            Err(e) => {
+                tracing::debug!("Model locked");
+                Err(e.into())
+            }
+        }
+    }
+}
+
+impl Deref for TextModelGuard {
+    type Target = Guard;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl TextModelConfig {

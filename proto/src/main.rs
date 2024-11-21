@@ -9,7 +9,8 @@ fn main() {
     )));
     let mut buf = Vec::new();
     p1.encode(&mut buf).unwrap();
-    buf.iter().for_each(|byte| println!("{}", format!("{:02x}", byte)));
+    buf.iter()
+        .for_each(|byte| println!("{}", format!("{:02x}", byte)));
 
     let p2 = Packet::decode(&mut buf.as_slice()).unwrap();
     println!("{:?}", p2);
