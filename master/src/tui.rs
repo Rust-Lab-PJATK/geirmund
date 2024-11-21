@@ -6,17 +6,26 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use futures::{FutureExt, StreamExt};
-use proto::master::ModelType;
-use std::{borrow::Borrow, fmt::Display, io::Write as IoWrite, rc::Rc, string::FromUtf8Error};
+use std::{borrow::Borrow, fmt::Display, io::Write as IoWrite, string::FromUtf8Error, sync::Arc};
 use thiserror::Error;
+use tokio::{io::AsyncReadExt, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-pub struct Tui;
+use crate::{
+    event_bus::{Event, EventBus, ServerEvent, TuiEvent},
+    ModelType,
+};
+
+pub struct Tui {
+    event_bus: EventBus,
+}
 
 pub enum TuiScreen {
     Menu,
     ChooseModel,
     WritePrompt,
+    WaitUntilWorkerLoadsModel,
+    WaitUntilWorkerConnects,
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -41,9 +50,7 @@ impl Display for TuiMenuOption {
 impl Display for TuiChooseModelMenuOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TuiChooseModelMenuOption::SelectModel(model) => match model.borrow() {
-                proto::master::ModelType::Llama3v2_1B => write!(f, "Llama v3.2 1B")?,
-            },
+            TuiChooseModelMenuOption::SelectModel(model) => write!(f, "{model}")?,
             TuiChooseModelMenuOption::Exit => {
                 write!(f, "Do not choose any model, go back to main menu.")?;
             }
@@ -55,7 +62,7 @@ impl Display for TuiChooseModelMenuOption {
 
 #[derive(Debug, Clone)]
 pub enum TuiChooseModelMenuOption {
-    SelectModel(std::rc::Rc<proto::master::ModelType>),
+    SelectModel(ModelType),
     Exit,
 }
 
@@ -69,6 +76,12 @@ pub enum TuiError {
 
     #[error("cancel signal has been received")]
     Cancelled,
+
+    #[error("tokio broadcast error occured: {0}")]
+    TokioReceiveError(#[from] tokio::sync::broadcast::error::RecvError),
+
+    #[error("tokio broadcast error occured: {0}")]
+    TokioSendError(String),
 }
 
 impl From<std::io::Error> for TuiError {
@@ -119,7 +132,7 @@ impl Tui {
         Ok(())
     }
 
-    pub async fn display_option_menu(
+    async fn display_option_menu(
         all_opts: &Vec<String>,
         cancellation_token: CancellationToken,
     ) -> Result<Option<usize>, TuiError> {
@@ -149,7 +162,7 @@ impl Tui {
         }
     }
 
-    pub async fn listen_for_menu_keys(
+    async fn listen_for_menu_keys(
         cancellation_token: CancellationToken,
     ) -> Result<TuiKeypress, TuiError> {
         let mut crossterm_ev_stream = CrosstermEventStream::new();
@@ -201,7 +214,7 @@ impl Tui {
         cancellation_token: CancellationToken,
     ) -> Result<TuiChooseModelMenuOption, TuiError> {
         let opts = vec![
-            TuiChooseModelMenuOption::SelectModel(Rc::new(proto::master::ModelType::Llama3v2_1B)),
+            TuiChooseModelMenuOption::SelectModel(ModelType::Llama3v2_1B),
             TuiChooseModelMenuOption::Exit,
         ];
 
@@ -216,8 +229,41 @@ impl Tui {
         }
     }
 
-    pub async fn run(cancellation_token: CancellationToken) -> Result<(), TuiError> {
-        let mut tui_screen = TuiScreen::Menu;
+    async fn launch_write_prompt_menu(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<String, TuiError> {
+        execute!(
+            std::io::stdout(),
+            Clear(ClearType::FromCursorUp),
+            MoveTo(0, 0),
+            Print("Write your prompt: "),
+        )?;
+
+        println!();
+
+        let mut buffer = String::new();
+
+        let mut stdin = tokio::io::stdin();
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(TuiError::Cancelled),
+                Err(e) = stdin.read_to_string(&mut buffer) => e,
+            };
+
+            while buffer.lines().count() > 1 {
+                return Ok(buffer);
+            }
+        }
+    }
+
+    pub fn new(event_bus: EventBus) -> Self {
+        Self { event_bus }
+    }
+
+    pub async fn run(&mut self, cancellation_token: CancellationToken) -> Result<(), TuiError> {
+        let mut tui_screen = TuiScreen::WaitUntilWorkerConnects;
 
         loop {
             match tui_screen {
@@ -231,12 +277,58 @@ impl Tui {
                 TuiScreen::ChooseModel => {
                     match Self::launch_choose_model_menu(cancellation_token.clone()).await? {
                         TuiChooseModelMenuOption::SelectModel(model) => {
-                            panic!("Chosen model: {:?}", model.clone());
+                            self.event_bus
+                                .send(Event::Tui(TuiEvent::SelectedModel(model.clone())))
+                                .map_err(|err| TuiError::TokioSendError(err.to_string()))?;
+
+                            tui_screen = TuiScreen::WaitUntilWorkerLoadsModel;
                         }
                         TuiChooseModelMenuOption::Exit => tui_screen = TuiScreen::Menu,
                     }
                 }
-                _ => unimplemented!(),
+                TuiScreen::WaitUntilWorkerLoadsModel => {
+                    execute!(
+                        std::io::stdout(),
+                        Print("Waiting for worker to load the model..."),
+                        ResetColor,
+                    )?;
+
+                    loop {
+                        let received = match self.event_bus.receive().await {
+                            Ok(Event::Server(ServerEvent::WorkerLoadedModel(model_type))) => {
+                                model_type
+                            }
+                            _ => continue,
+                        };
+
+                        tui_screen = TuiScreen::WritePrompt;
+                    }
+                }
+                TuiScreen::WaitUntilWorkerConnects => {
+                    execute!(
+                        std::io::stdout(),
+                        Clear(ClearType::All),
+                        MoveTo(0, 0),
+                        Print("Waiting for client to connect...")
+                    )?;
+
+                    loop {
+                        match self.event_bus.receive().await {
+                            Ok(Event::Server(ServerEvent::ClientConnected)) => {
+                                tui_screen = TuiScreen::ChooseModel;
+                                break;
+                            }
+                            _ => continue,
+                        };
+                    }
+                }
+                TuiScreen::WritePrompt => {
+                    let prompt = self
+                        .launch_write_prompt_menu(cancellation_token.clone())
+                        .await?;
+
+                    panic!("{:?}", prompt);
+                }
             }
         }
     }

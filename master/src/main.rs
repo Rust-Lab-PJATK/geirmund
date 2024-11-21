@@ -1,76 +1,90 @@
+use std::fmt::Display;
+
+use event_bus::EventBus;
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::Level;
 use tui::TuiError;
 
+mod event_bus;
+mod server;
 mod tui;
 
-mod server {
-    use thiserror::Error;
-    use tokio_util::sync::CancellationToken;
+#[derive(Debug, Clone, Copy)]
+pub enum ModelType {
+    Llama3v2_1B,
+}
 
-    #[derive(Error, Debug, Clone)]
-    pub enum StartServerError {
-        #[error("failed to bind the tcp listener to the address {0}; {1}")]
-        BindTcpListenerError(String, String),
-    }
-
-    pub async fn start(cancellation_token: CancellationToken) -> Result<(), StartServerError> {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
-            .await
-            .map_err(|err| {
-                StartServerError::BindTcpListenerError("0.0.0.0:8080".to_string(), err.to_string())
-            })?;
-
-        tracing::info!("The server has been bind on port 8080 for all incoming hosts!");
-
-        while !cancellation_token.is_cancelled() {
-            let accepted_token = tokio::select! {
-                accepted_socket = listener.accept() => match accepted_socket {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("Failed to accept connection to the listener: {}", e);
-                        continue;
-                    }
-                },
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => continue,
-            };
+impl From<proto::master::ModelType> for ModelType {
+    fn from(value: proto::master::ModelType) -> Self {
+        match value {
+            proto::master::ModelType::Llama3v2_1B => Self::Llama3v2_1B,
         }
+    }
+}
 
-        Ok(())
+impl Into<proto::master::ModelType> for ModelType {
+    fn into(self) -> proto::master::ModelType {
+        match self {
+            Self::Llama3v2_1B => proto::master::ModelType::Llama3v2_1B,
+        }
+    }
+}
+
+impl Display for ModelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Llama3v2_1B => write!(f, "Llama v3.2 1B"),
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // logs are currently going to a file
-    let file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open("master.log")
-        .unwrap();
+    std::env::set_var("RUST_LOG", "debug");
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(file))
-        .init();
+    let subscriber = tracing_subscriber::fmt()
+        .compact()
+        .with_level(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_max_level(Level::DEBUG) // TODO by env
+        .with_writer(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("master.log")
+                .unwrap(),
+        )
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     // disable raw mode, because when it is enabled it disables ctrl+c handling
     _ = crossterm::terminal::disable_raw_mode();
 
     let cancellation_token = CancellationToken::new();
 
-    let server_fut = Box::pin(server::start(cancellation_token.clone())).shared();
+    let mut event_bus = EventBus::new();
+
+    let mut tui = tui::Tui::new(event_bus.clone_mut());
+
+    let tui_fut = Box::pin(tui.run(cancellation_token.clone())).shared();
+    let server_fut = Box::pin(server::start(
+        event_bus.clone_mut(),
+        cancellation_token.clone(),
+    ))
+    .shared();
     let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
         _ = tokio::signal::ctrl_c().await;
     }))
     .shared();
-    let tui_fut = Box::pin(tui::Tui::run(cancellation_token.clone())).shared();
 
     tokio::select! {
         _ = server_fut.clone() => {},
         _ = signal_fut.clone() => {},
         _ = tui_fut.clone() => {},
-    }
+    };
 
     cancellation_token.cancel();
 
