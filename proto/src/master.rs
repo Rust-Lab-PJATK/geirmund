@@ -1,12 +1,12 @@
 use prost::{Enumeration, Message, Oneof};
 
-#[derive(Message)]
+#[derive(Message, PartialEq)]
 pub struct Packet {
     #[prost(oneof = "MasterMessage", tags = "1, 2")]
     pub msg: Option<MasterMessage>,
 }
 
-#[derive(Oneof)]
+#[derive(Oneof, PartialEq)]
 pub enum MasterMessage {
     #[prost(message, tag = "1")]
     LoadCommand(Load),
@@ -15,19 +15,19 @@ pub enum MasterMessage {
     GenerateCommand(Generate),
 }
 
-#[derive(Message)]
+#[derive(Message, PartialEq)]
 pub struct Load {
     #[prost(enumeration = "ModelType", tag = "1")]
     pub r#type: i32,
 }
 
-#[derive(Enumeration, Debug)]
+#[derive(Enumeration, Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(i32)]
 pub enum ModelType {
     Llama3v2_1B = 0,
 }
 
-#[derive(Message)]
+#[derive(Message, PartialEq)]
 pub struct Generate {
     #[prost(int32, tag = "1")]
     pub id: i32,
