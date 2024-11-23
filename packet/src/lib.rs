@@ -14,7 +14,7 @@ enum RLPGParserState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RLPGParser {
+pub struct RLPGParser {
     state: RLPGParserState,
     buffer: Vec<u8>,
     current_index: usize,
