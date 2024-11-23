@@ -14,10 +14,13 @@ candle-transformers = { version = "0.8.0" }
 derive_more = { version = "1.0.0", features = ["debug"] }
 serde_json = "1.0.132"
 tokenizers = "0.20.1"
-tokio = { version = "1.41.0", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread"] }
+tokio = { version = "1.41.0", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 bytes = "1.8.0"
 prost = "0.13.3"
 clap = { version = "4.5.20", features = ["derive"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+tokio-util = "0.7.12"
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
