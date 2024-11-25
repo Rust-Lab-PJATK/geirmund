@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 
 use thiserror::Error;
 
+pub mod tcp;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const STARTING_PAYLOAD: LazyLock<String> = LazyLock::new(|| format!("RLPG/{VERSION}\n"));
 

@@ -1292,7 +1292,10 @@ checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 name = "packet"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "thiserror 2.0.3",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
