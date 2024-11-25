@@ -1,7 +1,7 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::broadcast::{error::SendError, Receiver, Sender},
 };
@@ -28,6 +28,12 @@ impl From<SendError<RLPGEvent>> for RunServerError {
     }
 }
 
+impl From<Arc<SendError<RLPGEvent>>> for RunServerError {
+    fn from(value: Arc<SendError<RLPGEvent>>) -> Self {
+        return RunServerError::SendError(value);
+    }
+}
+
 impl From<tokio::io::Error> for RunServerError {
     fn from(value: tokio::io::Error) -> Self {
         return RunServerError::IOError(Arc::new(value));
@@ -44,19 +50,17 @@ impl RLPGTcpListener {
     fn run_on_socket(
         mut socket: TcpStream,
         cancellation_token: CancellationToken,
-        socket_event_bus: RLPGEventBus,
+        mut socket_event_bus: RLPGEventBus,
+        socket_addr: SocketAddr,
     ) -> impl Future<Output = Result<(), RunServerError>> {
         async move {
             let mut parser = RLPGParser::new();
-            let mut buf: Vec<u8> = Vec::new();
 
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => return Ok(()),
-                    _ = socket.read_to_end(&mut buf) => {},
+                    v = socket.read_u8() => parser.add_char_to_buffer(v?)
                 };
-
-                parser.add_to_buffer(&buf);
 
                 match parser.parse() {
                     Ok(Some(parsed_data)) => {
@@ -66,9 +70,16 @@ impl RLPGTcpListener {
 
                         parser = RLPGParser::new();
                     }
-                    Err(_) => return Ok(()),
+                    Err(e) => {
+                        let _ = socket.shutdown().await;
+                        socket_event_bus.send(RLPGEvent::ClientDisconnected((
+                            DisconnectReason::InvalidByte,
+                            socket_addr,
+                        )))?;
+                        return Ok(());
+                    }
                     _ => {}
-                }
+                };
             }
         }
     }
@@ -79,11 +90,10 @@ impl RLPGTcpListener {
         cancellation_token: CancellationToken,
     ) -> Result<(), RunServerError> {
         let listener = TcpListener::bind(addr).await?;
-
         loop {
-            let (socket, _) = tokio::select! {
+            let (socket, addr) = tokio::select! {
                 res = listener.accept() => res?,
-                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = cancellation_token.cancelled() => return Ok(())
             };
 
             let cancellation_token = cancellation_token.clone();
@@ -94,16 +104,22 @@ impl RLPGTcpListener {
                 socket,
                 cancellation_token,
                 socket_event_bus,
+                addr,
             ));
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectReason {
+    InvalidByte,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RLPGEvent {
     NewPacket(Vec<u8>),
-
-    ClientDisconnected(SocketAddr),
+    ClientDisconnected((DisconnectReason, SocketAddr)),
 }
 
 #[derive(Debug)]
@@ -146,12 +162,17 @@ impl RLPGEventBus {
 
 #[cfg(test)]
 mod tests {
-    use tokio::{io::AsyncWriteExt, net::TcpStream};
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncWriteExt, Interest},
+        net::{TcpSocket, TcpStream},
+    };
     use tokio_util::sync::CancellationToken;
 
     use crate::tcp::RLPGEvent;
 
-    use super::{RLPGEventBus, RLPGTcpListener};
+    use super::{DisconnectReason, RLPGEventBus, RLPGTcpListener};
 
     async fn send_data_to_server(addr: &str, contents: Vec<Vec<u8>>, with_timeout: bool) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -171,8 +192,10 @@ mod tests {
 
             connection.write(content.as_bytes()).await.unwrap();
 
-            if with_timeout {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            connection.flush().await.unwrap();
+
+            if index + 1 != content.len() && with_timeout {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         }
     }
@@ -193,6 +216,8 @@ mod tests {
         let event = event_bus.receive().await;
 
         cancellation_token.cancel();
+
+        dbg!(event.clone());
 
         assert!(matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet));
 
@@ -224,5 +249,39 @@ mod tests {
         assert!(matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet));
 
         let _ = server_fut.await.unwrap();
+    }
+
+    #[tokio::test]
+    pub async fn test_if_tcp_server_disconnects_a_client_when_client_sends_invalid_payload() {
+        let mut event_bus = RLPGEventBus::new();
+        let server = RLPGTcpListener::new(event_bus.clone());
+
+        let cancellation_token = CancellationToken::new();
+
+        let server_cancel_token = cancellation_token.clone();
+        let server_fut =
+            tokio::spawn(async move { server.run("0.0.0.0:4341", server_cancel_token).await });
+
+        let mut client = TcpStream::connect("127.0.0.1:4341").await.unwrap();
+        match client.write(b"Some shit").await {
+            Ok(v) => assert!(v == 9, "Expected 9 bytes to be sent back."),
+            v => assert!(false, "Expected Ok(bytes), received {v:?}"),
+        };
+
+        client.flush().await.unwrap();
+
+        let event = event_bus.receive().await;
+
+        assert!(
+            matches!(event, RLPGEvent::ClientDisconnected((reason, _)) if reason == DisconnectReason::InvalidByte)
+        );
+
+        assert!(
+            client.write(b"test").await.is_err(),
+            "Expected client to be disconnected."
+        );
+
+        cancellation_token.cancel();
+        let _ = server_fut.await;
     }
 }

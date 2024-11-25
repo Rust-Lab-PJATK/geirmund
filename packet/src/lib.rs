@@ -51,6 +51,10 @@ impl RLPGParser {
         }
     }
 
+    pub fn add_char_to_buffer(&mut self, payload: u8) {
+        self.buffer.push(payload);
+    }
+
     fn parse_header_start(&mut self) -> Result<bool, ParsingError> {
         let starting_payload_str = STARTING_PAYLOAD.clone();
         let starting_payload = starting_payload_str.as_bytes();
@@ -58,6 +62,8 @@ impl RLPGParser {
         if self.current_index > starting_payload.len() {
             return Ok(false);
         }
+
+        dbg!(self.current_index, self.buffer.len(), self.buffer.clone());
 
         while self.current_index < self.buffer.len() && self.current_index < STARTING_PAYLOAD.len()
         {
@@ -71,10 +77,14 @@ impl RLPGParser {
             self.current_index += 1;
         }
 
+        println!("1");
+
         assert!(
             self.current_index <= STARTING_PAYLOAD.len(),
             "Current index must not be greater than length of starting payload."
         );
+
+        println!("{} == {}", STARTING_PAYLOAD.len(), self.current_index);
 
         Ok(STARTING_PAYLOAD.len() == self.current_index)
     }
