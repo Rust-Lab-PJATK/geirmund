@@ -6,7 +6,9 @@ use anyhow::Error as E;
 use proto::master::{
     GenerateCommand, LoadCommand, MasterMessage, ModelType, Packet as MasterPacket,
 };
-use proto::worker::{GenerateResponse, LoadResponse, Packet as WorkerPacket, WorkerError};
+use proto::worker::{
+    GenerateResponse, LoadResponse, Packet as WorkerPacket, WorkerError, WorkerErrorContent,
+};
 use proto::ProtoResult;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -83,15 +85,16 @@ fn handle_load(
         Ok(guard) if guard.is_some() => {
             tracing::info!("Model is already loaded");
             let response = WorkerPacket::new_load_response(ProtoResult::Err(
-                WorkerError::ModelAlreadyLoaded.into(),
+                WorkerError::ModelAlreadyLoaded(WorkerErrorContent::new(msg.id)).into(),
             ));
             blocking_send(&otx, response);
             return;
         }
         Ok(guard) => guard,
         Err(_) => {
-            let response =
-                WorkerPacket::new_load_response(ProtoResult::Err(WorkerError::ModelBusy.into()));
+            let response = WorkerPacket::new_load_response(ProtoResult::Err(
+                WorkerError::ModelBusy(WorkerErrorContent::new(msg.id)).into(),
+            ));
             blocking_send(&otx, response);
             return;
         }
@@ -106,7 +109,7 @@ fn handle_load(
             }
             Err(err) => {
                 tracing::error!("Loading: {}", err);
-                ProtoResult::Err(WorkerError::LoadingError.into())
+                ProtoResult::Err(WorkerError::LoadingError(WorkerErrorContent::new(msg.id)).into())
             }
         },
     };
@@ -125,16 +128,20 @@ fn handle_generate(msg: GenerateCommand, model: Arc<TextModelGuard>, otx: Sender
                 }
                 Err(err) => {
                     tracing::error!("Generation: {}", err);
-                    ProtoResult::Err(WorkerError::GenerationError.into())
+                    ProtoResult::Err(
+                        WorkerError::GenerationError(WorkerErrorContent::new(msg.id)).into(),
+                    )
                 }
             },
             None => {
                 tracing::info!("Model not loaded");
-                ProtoResult::Err(WorkerError::ModelNotLoaded.into())
+                ProtoResult::Err(
+                    WorkerError::ModelNotLoaded(WorkerErrorContent::new(msg.id)).into(),
+                )
             }
         }
     } else {
-        ProtoResult::Err(WorkerError::ModelBusy.into())
+        ProtoResult::Err(WorkerError::ModelBusy(WorkerErrorContent::new(msg.id)).into())
     };
 
     let response = WorkerPacket::new_generate_response(response);
