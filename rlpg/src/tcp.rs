@@ -40,47 +40,59 @@ impl From<tokio::io::Error> for RunServerError {
     }
 }
 
+pub fn run_on_socket(
+    mut socket: TcpStream,
+    cancellation_token: CancellationToken,
+    mut socket_event_bus: RLPGEventBus,
+    socket_addr: SocketAddr,
+) -> impl Future<Output = Result<(), RunServerError>> {
+    async move {
+        let mut parser = RLPGParser::new();
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                res = socket.read_u8() => {
+                    match res {
+                        Ok(character) => parser.add_char_to_buffer(character),
+                        Err(e) => {
+                            let _ = socket.shutdown().await;
+                            socket_event_bus.send(RLPGEvent::ClientDisconnected((
+                                DisconnectReason::Unknown,
+                                socket_addr,
+                            )))?;
+                            return Err(RunServerError::IOError(Arc::new(e)));
+                        }
+                    };
+                }
+            };
+
+            match parser.parse() {
+                Ok(Some(parsed_data)) => {
+                    socket_event_bus
+                        .sender
+                        .send(RLPGEvent::NewPacket(parsed_data))?;
+
+                    parser = RLPGParser::new();
+                }
+                Err(e) => {
+                    let _ = socket.shutdown().await;
+                    socket_event_bus.send(RLPGEvent::ClientDisconnected((
+                        DisconnectReason::InvalidByte,
+                        socket_addr,
+                    )))?;
+                    return Ok(());
+                }
+                _ => {}
+            };
+        }
+    }
+}
+
 impl RLPGTcpListener {
     pub fn new(event_bus: RLPGEventBus) -> Self {
         RLPGTcpListener {
             event_bus: event_bus,
-        }
-    }
-
-    fn run_on_socket(
-        mut socket: TcpStream,
-        cancellation_token: CancellationToken,
-        mut socket_event_bus: RLPGEventBus,
-        socket_addr: SocketAddr,
-    ) -> impl Future<Output = Result<(), RunServerError>> {
-        async move {
-            let mut parser = RLPGParser::new();
-
-            loop {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => return Ok(()),
-                    v = socket.read_u8() => parser.add_char_to_buffer(v?)
-                };
-
-                match parser.parse() {
-                    Ok(Some(parsed_data)) => {
-                        socket_event_bus
-                            .sender
-                            .send(RLPGEvent::NewPacket(parsed_data))?;
-
-                        parser = RLPGParser::new();
-                    }
-                    Err(e) => {
-                        let _ = socket.shutdown().await;
-                        socket_event_bus.send(RLPGEvent::ClientDisconnected((
-                            DisconnectReason::InvalidByte,
-                            socket_addr,
-                        )))?;
-                        return Ok(());
-                    }
-                    _ => {}
-                };
-            }
         }
     }
 
@@ -100,7 +112,7 @@ impl RLPGTcpListener {
 
             let socket_event_bus = self.event_bus.clone();
 
-            tokio::spawn(Self::run_on_socket(
+            tokio::spawn(run_on_socket(
                 socket,
                 cancellation_token,
                 socket_event_bus,
