@@ -79,11 +79,11 @@ where
 mod tests {
     use prost::Message;
 
-    use crate::master::{Generate, MasterMessage, ModelType, Packet};
+    use crate::master::{GenerateCommand, MasterMessage, ModelType, Packet};
 
     #[test]
     pub fn it_encodes_and_decodes_to_the_same_data() {
-        let packet = Packet::new(MasterMessage::GenerateCommand(Generate::new(
+        let packet = Packet::new(MasterMessage::GenerateCommand(GenerateCommand::new(
             1,
             ModelType::Llama3v2_1B,
             "write me a poem".to_string(),
