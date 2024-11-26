@@ -1,6 +1,7 @@
 use crate::{ProtoResult, ProtoResultWrapper};
 use prost::{Message, Oneof};
 
+
 #[derive(Message, Clone, Eq, PartialEq)]
 pub struct Packet {
     // Must be wrapped with an `Option` as `prost` crate requires so.
@@ -117,5 +118,4 @@ impl WorkerErrorContent {
 impl Into<WorkerErrorWrapper> for WorkerError {
     fn into(self) -> WorkerErrorWrapper {
         WorkerErrorWrapper { err: Some(self) }
-    }
 }
