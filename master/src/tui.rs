@@ -6,17 +6,16 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use futures::{FutureExt, StreamExt};
-use std::{borrow::Borrow, fmt::Display, io::Write as IoWrite, string::FromUtf8Error, sync::Arc};
+use std::{fmt::Display, io::Write as IoWrite, net::SocketAddr, string::FromUtf8Error};
 use thiserror::Error;
-use tokio::{io::AsyncReadExt, sync::Mutex};
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    event_bus::{Event, EventBus, ServerEvent, TuiEvent},
-    ModelType,
-};
+use crate::event_bus::{Event, EventBus, ServerEvent, TuiEvent};
+use proto::master::ModelType;
 
 pub struct Tui {
+    connected_client_addr: Option<SocketAddr>,
     event_bus: EventBus,
 }
 
@@ -50,7 +49,9 @@ impl Display for TuiMenuOption {
 impl Display for TuiChooseModelMenuOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TuiChooseModelMenuOption::SelectModel(model) => write!(f, "{model}")?,
+            TuiChooseModelMenuOption::SelectModel(ModelType::Llama3v2_1B) => {
+                write!(f, "Llama v3.2 1B")?
+            }
             TuiChooseModelMenuOption::Exit => {
                 write!(f, "Do not choose any model, go back to main menu.")?;
             }
@@ -259,7 +260,10 @@ impl Tui {
     }
 
     pub fn new(event_bus: EventBus) -> Self {
-        Self { event_bus }
+        Self {
+            event_bus,
+            connected_client_addr: None,
+        }
     }
 
     pub async fn run(&mut self, cancellation_token: CancellationToken) -> Result<(), TuiError> {
@@ -314,7 +318,8 @@ impl Tui {
 
                     loop {
                         match self.event_bus.receive().await {
-                            Ok(Event::Server(ServerEvent::ClientConnected)) => {
+                            Ok(Event::Server(ServerEvent::ClientConnected(addr))) => {
+                                self.connected_client_addr = Some(addr);
                                 tui_screen = TuiScreen::ChooseModel;
                                 break;
                             }

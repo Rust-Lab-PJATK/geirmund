@@ -1,14 +1,10 @@
-use std::sync::Arc;
+use std::net::SocketAddr;
 
-use tokio::sync::{
-    broadcast::{
-        self,
-        error::{RecvError, SendError},
-    },
-    Mutex,
+use proto::master::ModelType;
+use tokio::sync::broadcast::{
+    self,
+    error::{RecvError, SendError},
 };
-
-use crate::ModelType;
 
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
@@ -23,8 +19,10 @@ pub enum Event {
 
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    WorkerLoadedModel(Arc<Mutex<ModelType>>),
-    ClientConnected,
+    WorkerLoadedModel(ModelType),
+    WorkerGeneratedResponse(String),
+    ClientConnected(SocketAddr),
+    ClientDisconnected,
 }
 
 #[derive(Debug)]

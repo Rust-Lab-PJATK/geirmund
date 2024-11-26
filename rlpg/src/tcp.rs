@@ -40,6 +40,29 @@ impl From<tokio::io::Error> for RunServerError {
     }
 }
 
+async fn disconnect_the_client_on_event(
+    event: RLPGEvent,
+    socket: &mut TcpStream,
+    socket_event_bus: &mut RLPGEventBus,
+    socket_addr: &SocketAddr,
+) -> Result<bool, RunServerError> {
+    match event {
+        RLPGEvent::DisconnectTheClient(addr) => {
+            if addr != *socket_addr {
+                return Ok(false);
+            }
+
+            let _ = socket.shutdown().await;
+            socket_event_bus.send(RLPGEvent::ClientDisconnected((
+                DisconnectReason::Unknown,
+                *socket_addr,
+            )))?;
+            return Ok(true);
+        }
+        _ => return Ok(false),
+    }
+}
+
 pub fn run_on_socket(
     mut socket: TcpStream,
     cancellation_token: CancellationToken,
@@ -64,14 +87,19 @@ pub fn run_on_socket(
                             return Err(RunServerError::IOError(Arc::new(e)));
                         }
                     };
-                }
+                },
+                ev = socket_event_bus.receive() => {
+                    if disconnect_the_client_on_event(ev, &mut socket, &mut socket_event_bus, &socket_addr).await? {
+                        return Ok(());
+                    }
+                },
             };
 
             match parser.parse() {
                 Ok(Some(parsed_data)) => {
                     socket_event_bus
                         .sender
-                        .send(RLPGEvent::NewPacket(parsed_data))?;
+                        .send(RLPGEvent::NewPacket((parsed_data, socket_addr)))?;
 
                     parser = RLPGParser::new();
                 }
@@ -110,7 +138,13 @@ impl RLPGTcpListener {
 
             let cancellation_token = cancellation_token.clone();
 
-            let socket_event_bus = self.event_bus.clone();
+            let mut socket_event_bus = self.event_bus.clone();
+
+            if let Err(e) = socket_event_bus.send(RLPGEvent::ClientConnected(addr)) {
+                panic!(
+                    "Error occured while trying to send RLPGEvent::ClientConnected event: {e:?}"
+                );
+            }
 
             tokio::spawn(run_on_socket(
                 socket,
@@ -130,8 +164,10 @@ pub enum DisconnectReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RLPGEvent {
-    NewPacket(Vec<u8>),
+    ClientConnected(SocketAddr),
+    NewPacket((Vec<u8>, SocketAddr)),
     ClientDisconnected((DisconnectReason, SocketAddr)),
+    DisconnectTheClient(SocketAddr),
 }
 
 #[derive(Debug)]
@@ -231,7 +267,9 @@ mod tests {
 
         dbg!(event.clone());
 
-        assert!(matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet));
+        assert!(
+            matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet.0)
+        );
 
         let _ = server_fut.await.unwrap();
     }
@@ -258,7 +296,9 @@ mod tests {
 
         cancellation_token.cancel();
 
-        assert!(matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet));
+        assert!(
+            matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet.0)
+        );
 
         let _ = server_fut.await.unwrap();
     }

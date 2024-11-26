@@ -1025,7 +1025,9 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "futures",
+ "prost",
  "proto",
+ "rlpg",
  "thiserror 2.0.3",
  "tokio",
  "tokio-util",

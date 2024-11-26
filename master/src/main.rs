@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use event_bus::EventBus;
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
@@ -9,35 +7,6 @@ use tui::TuiError;
 mod event_bus;
 mod server;
 mod tui;
-
-#[derive(Debug, Clone, Copy)]
-pub enum ModelType {
-    Llama3v2_1B,
-}
-
-impl From<proto::master::ModelType> for ModelType {
-    fn from(value: proto::master::ModelType) -> Self {
-        match value {
-            proto::master::ModelType::Llama3v2_1B => Self::Llama3v2_1B,
-        }
-    }
-}
-
-impl Into<proto::master::ModelType> for ModelType {
-    fn into(self) -> proto::master::ModelType {
-        match self {
-            Self::Llama3v2_1B => proto::master::ModelType::Llama3v2_1B,
-        }
-    }
-}
-
-impl Display for ModelType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Llama3v2_1B => write!(f, "Llama v3.2 1B"),
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -70,9 +39,10 @@ async fn main() {
     let mut tui = tui::Tui::new(event_bus.clone_mut());
 
     let tui_fut = Box::pin(tui.run(cancellation_token.clone())).shared();
-    let server_fut = Box::pin(server::start(
-        event_bus.clone_mut(),
+    let server_fut = Box::pin(server::run(
+        String::from("127.0.0.1:4339"),
         cancellation_token.clone(),
+        event_bus.clone_mut(),
     ))
     .shared();
     let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
