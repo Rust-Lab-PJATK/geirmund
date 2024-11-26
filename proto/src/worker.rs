@@ -1,6 +1,6 @@
 use crate::{ProtoResult, ProtoResultWrapper};
-use prost::{Enumeration, Message, Oneof};
-use std::fmt::Debug;
+use prost::{Message, Oneof};
+
 
 #[derive(Message, Clone, Eq, PartialEq)]
 pub struct Packet {
@@ -37,20 +37,37 @@ pub struct LoadResponse {
 // as enums can not be passed as `Message` with `prost` crate.
 // This type should not be constructed directly
 // but rather with `WorkerError::into()`.
-#[derive(Message, Copy, Clone, PartialEq, Eq)]
+#[derive(Message, Clone, PartialEq, Eq)]
 pub struct WorkerErrorWrapper {
-    #[prost(enumeration = "WorkerError", tag = "1")]
-    pub r#err: i32,
+    #[prost(oneof = "WorkerError", tags = "1, 2, 3, 4, 5")]
+    pub err: Option<WorkerError>,
 }
 
-#[derive(Enumeration, Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(i32)]
+#[derive(Oneof, Clone, PartialEq, Eq)]
 pub enum WorkerError {
-    ModelBusy = 0,
-    ModelAlreadyLoaded = 1,
-    ModelNotLoaded = 2,
-    LoadingError = 3,
-    GenerationError = 4,
+    #[prost(message, tag = "1")]
+    ModelBusy(WorkerErrorContent),
+
+    #[prost(message, tag = "2")]
+    ModelAlreadyLoaded(WorkerErrorContent),
+
+    #[prost(message, tag = "3")]
+    ModelNotLoaded(WorkerErrorContent),
+
+    #[prost(message, tag = "4")]
+    LoadingError(WorkerErrorContent),
+
+    #[prost(message, tag = "5")]
+    GenerationError(WorkerErrorContent),
+}
+
+#[derive(Message, Clone, PartialEq, Eq)]
+pub struct WorkerErrorContent {
+    #[prost(uint32, tag = "1")]
+    id: u32,
+
+    #[prost(string, optional, tag = "2")]
+    content: Option<String>,
 }
 
 impl Packet {
@@ -85,8 +102,20 @@ impl LoadResponse {
     }
 }
 
+impl WorkerErrorContent {
+    pub fn new(id: u32) -> Self {
+        Self { id, content: None }
+    }
+
+    pub fn new_with_content(id: u32, content: String) -> Self {
+        Self {
+            id,
+            content: Some(content),
+        }
+    }
+}
+
 impl Into<WorkerErrorWrapper> for WorkerError {
     fn into(self) -> WorkerErrorWrapper {
-        WorkerErrorWrapper { r#err: self as i32 }
-    }
+        WorkerErrorWrapper { err: Some(self) }
 }
