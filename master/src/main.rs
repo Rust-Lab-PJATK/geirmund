@@ -1,10 +1,10 @@
-use event_bus::EventBus;
 use futures::FutureExt;
+use rlpg::tcp::{RLPGEvent, RLPGEventBus};
+use server::WorkerGateway;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tui::TuiError;
 
-mod event_bus;
 mod server;
 mod tui;
 
@@ -34,15 +34,15 @@ async fn main() {
 
     let cancellation_token = CancellationToken::new();
 
-    let mut event_bus = EventBus::new();
+    let rlpg_event_bus = RLPGEventBus::new();
 
-    let mut tui = tui::Tui::new(event_bus.clone_mut());
+    let mut tui = tui::Tui::new(rlpg_event_bus.clone());
 
     let tui_fut = Box::pin(tui.run(cancellation_token.clone())).shared();
     let server_fut = Box::pin(server::run(
         String::from("127.0.0.1:4339"),
         cancellation_token.clone(),
-        event_bus.clone_mut(),
+        rlpg_event_bus,
     ))
     .shared();
     let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {

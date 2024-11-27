@@ -10,73 +10,11 @@ use thiserror::Error;
 use tokio::sync::broadcast::error::SendError;
 use tokio_util::sync::CancellationToken;
 
-use crate::event_bus::{Event, EventBus, ServerEvent};
 use prost::{DecodeError, EncodeError, Message};
-
-#[derive(Error, Debug, Clone)]
-pub enum ReactToRLPGEventError {
-    #[error("protobuf decode error: {0}")]
-    DecodeError(#[from] prost::DecodeError),
-
-    #[error("send error occured: {0}")]
-    SendError(Arc<SendError<Event>>),
-}
-
-impl From<SendError<Event>> for ReactToRLPGEventError {
-    fn from(value: SendError<Event>) -> Self {
-        return ReactToRLPGEventError::SendError(Arc::new(value));
-    }
-}
-
-fn react_to_rlpg_event(
-    event_bus: &mut EventBus,
-    rlpg_event_bus: &mut RLPGEventBus,
-    event: RLPGEvent,
-) -> Option<proto::worker::Packet> {
-    match event {
-        RLPGEvent::ClientConnected(addr) => {
-            event_bus
-                .send(Event::Server(ServerEvent::ClientConnected(addr)))
-                .unwrap();
-
-            return None;
-        }
-        RLPGEvent::NewPacketReceived((packet, addr)) => {
-            match proto::worker::Packet::decode(&mut packet.as_slice()) {
-                Ok(v) => return Some(v),
-                Err(e) => {
-                    if let Err(send_err) = rlpg_event_bus.send(RLPGEvent::DisconnectTheClient(addr))
-                    {
-                        panic!("Error occured while trying to send DisconnectTheClient event: {send_err:?}, {e:?}")
-                    }
-                    panic!("Error occured while parsing protobuf packet from worker: {e:?}");
-                }
-            }
-        }
-        RLPGEvent::ClientDisconnected(_) => {
-            if let Err(e) = event_bus.send(Event::Server(ServerEvent::ClientDisconnected)) {
-                panic!("Error occured while trying to send event: {e:?}");
-            }
-
-            return None;
-        }
-        _ => return None,
-    };
-}
 
 #[derive(Error, Debug, Clone)]
 #[error("failed to convert packet to event")]
 struct PacketParsingError;
-
-/// Structure that abstracts whole event bus communication logic.
-///
-/// It encapsulates all the logic that is needed to communicate with the worker.
-/// For the most part it sends the packet via event bus, waits for the response
-/// via event bus as well and then returns the result.
-pub struct WorkerGateway {
-    rlpg_event_bus: RLPGEventBus,
-    event_bus: EventBus,
-}
 
 #[derive(Error, Clone, Debug)]
 pub enum WorkerGatewayCommandError {
@@ -108,14 +46,9 @@ impl From<ConversionError> for WorkerGatewayCommandError {
     }
 }
 
-impl WorkerGateway {
-    pub fn new(rlpg_event_bus: RLPGEventBus, event_bus: EventBus) -> Self {
-        Self {
-            rlpg_event_bus,
-            event_bus,
-        }
-    }
+pub struct WorkerGateway;
 
+impl WorkerGateway {
     fn generate_new_request_id() -> u32 {
         rand::random::<u32>()
     }
@@ -152,7 +85,7 @@ impl WorkerGateway {
     /// First argument is the socket address of the worker.
     /// Second argument is the type of the model that should be loaded.
     pub async fn load_model(
-        &mut self,
+        mut rlpg_event_bus: RLPGEventBus,
         socket_addr: SocketAddr,
         model_type: ModelType,
     ) -> Result<(), WorkerGatewayCommandError> {
@@ -164,12 +97,11 @@ impl WorkerGateway {
 
         let packet_as_bytes = Self::convert_packet_to_bytes(packet)?;
 
-        self.rlpg_event_bus
-            .send(RLPGEvent::SendNewPacket((packet_as_bytes, socket_addr)))?;
+        rlpg_event_bus.send(RLPGEvent::SendNewPacket((packet_as_bytes, socket_addr)))?;
 
         loop {
             let packet_payload =
-                Self::get_packet_for_socket_addr(&mut self.rlpg_event_bus, &socket_addr).await?;
+                Self::get_packet_for_socket_addr(&mut rlpg_event_bus, &socket_addr).await?;
 
             match packet_payload.msg {
                 Some(proto::worker::WorkerMessage::LoadResponse(load_response)) => {
@@ -195,7 +127,7 @@ impl WorkerGateway {
     }
 
     pub async fn generate_response(
-        &mut self,
+        mut rlpg_event_bus: RLPGEventBus,
         socket_addr: SocketAddr,
         model_type: ModelType,
         prompt: impl Into<String>,
@@ -210,12 +142,11 @@ impl WorkerGateway {
 
         let packet = Self::convert_packet_to_bytes(packet)?;
 
-        self.rlpg_event_bus
-            .send(RLPGEvent::SendNewPacket((packet, socket_addr)))?;
+        rlpg_event_bus.send(RLPGEvent::SendNewPacket((packet, socket_addr)))?;
 
         loop {
             let packet =
-                Self::get_packet_for_socket_addr(&mut self.rlpg_event_bus, &socket_addr).await?;
+                Self::get_packet_for_socket_addr(&mut rlpg_event_bus, &socket_addr).await?;
 
             match packet.msg {
                 Some(proto::worker::WorkerMessage::GenerateResponse(operation_result)) => {
@@ -239,6 +170,28 @@ impl WorkerGateway {
             };
         }
     }
+
+    pub async fn worker_disconnected(mut rlpg_event_bus: RLPGEventBus, socket_addr: &SocketAddr) {
+        loop {
+            match rlpg_event_bus.receive().await {
+                RLPGEvent::ClientDisconnected((_, addr)) => {
+                    if addr == *socket_addr {
+                        return;
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    pub async fn worker_connected(mut rlpg_event_bus: RLPGEventBus) -> SocketAddr {
+        loop {
+            match rlpg_event_bus.receive().await {
+                RLPGEvent::ClientConnected(addr) => return addr,
+                _ => continue,
+            };
+        }
+    }
 }
 
 /// Run the server on the given address
@@ -253,11 +206,10 @@ impl WorkerGateway {
 pub fn run(
     addr: String,
     cancellation_token: CancellationToken,
-    mut event_bus: EventBus,
+    rlpg_event_bus: RLPGEventBus,
 ) -> impl Future<Output = Result<(), RunServerError>> {
     async move {
-        let mut rlpg_event_bus = RLPGEventBus::new();
-        let rlpg_server = RLPGTcpListener::new(rlpg_event_bus.clone());
+        let rlpg_server = RLPGTcpListener::new(rlpg_event_bus);
 
         let addr = addr.clone();
         let server_fut_cancel_token = cancellation_token.clone();

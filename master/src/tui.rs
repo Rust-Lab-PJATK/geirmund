@@ -6,25 +6,38 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use futures::{FutureExt, StreamExt};
-use std::{fmt::Display, io::Write as IoWrite, net::SocketAddr, string::FromUtf8Error};
+use rlpg::tcp::RLPGEventBus;
+use std::{
+    fmt::Display, future::Future, io::Write as IoWrite, net::SocketAddr, string::FromUtf8Error,
+};
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::{io::AsyncReadExt, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::event_bus::{Event, EventBus, ServerEvent, TuiEvent};
+use crate::server::{WorkerGateway, WorkerGatewayCommandError};
 use proto::master::ModelType;
+
+enum CurrentFuture {
+    LoadModel(JoinHandle<Result<(), WorkerGatewayCommandError>>),
+    GenerateResponse(JoinHandle<Result<String, WorkerGatewayCommandError>>),
+    None,
+}
 
 pub struct Tui {
     connected_client_addr: Option<SocketAddr>,
-    event_bus: EventBus,
+    rlpg_event_bus: RLPGEventBus,
+    tui_screen: TuiScreen,
+    current_worker_gateway_bg_task: CurrentFuture,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum TuiScreen {
     Menu,
     ChooseModel,
     WritePrompt,
     WaitUntilWorkerLoadsModel,
     WaitUntilWorkerConnects,
+    Error(String, Box<TuiScreen>),
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -259,36 +272,61 @@ impl Tui {
         }
     }
 
-    pub fn new(event_bus: EventBus) -> Self {
+    pub fn new(rlpg_event_bus: RLPGEventBus) -> Self {
         Self {
-            event_bus,
             connected_client_addr: None,
+            rlpg_event_bus,
+            tui_screen: TuiScreen::WaitUntilWorkerConnects,
+            current_worker_gateway_bg_task: CurrentFuture::None,
         }
     }
 
-    pub async fn run(&mut self, cancellation_token: CancellationToken) -> Result<(), TuiError> {
-        let mut tui_screen = TuiScreen::WaitUntilWorkerConnects;
+    fn handle_worker_disconnect(&mut self) {
+        self.tui_screen = TuiScreen::Error(
+            "Worker disconnected".to_string(),
+            Box::new(TuiScreen::WaitUntilWorkerConnects),
+        );
+        self.connected_client_addr = None;
+    }
 
+    pub async fn run(&mut self, cancellation_token: CancellationToken) -> Result<(), TuiError> {
         loop {
-            match tui_screen {
+            match &self.tui_screen {
                 TuiScreen::Menu => {
-                    match Self::launch_main_menu(cancellation_token.clone()).await? {
-                        TuiMenuOption::Exit => return Ok(()),
-                        TuiMenuOption::GenerateOutput => tui_screen = TuiScreen::WritePrompt,
-                        TuiMenuOption::LoadModel => tui_screen = TuiScreen::ChooseModel,
-                    }
+                    let socket_addr = self.connected_client_addr.unwrap();
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        menu_opt = Self::launch_main_menu(cancellation_token.clone())=> match menu_opt {
+                            Ok(menu_opt) => match menu_opt {
+                                TuiMenuOption::Exit => return Ok(()),
+                                TuiMenuOption::GenerateOutput => self.tui_screen = TuiScreen::WritePrompt,
+                                TuiMenuOption::LoadModel => self.tui_screen = TuiScreen::ChooseModel,
+                            },
+                            Err(e) => return Err(e),
+                        },
+                        _ = WorkerGateway::worker_disconnected(self.rlpg_event_bus.clone(), &socket_addr) => self.handle_worker_disconnect(),
+                    };
                 }
                 TuiScreen::ChooseModel => {
-                    match Self::launch_choose_model_menu(cancellation_token.clone()).await? {
-                        TuiChooseModelMenuOption::SelectModel(model) => {
-                            self.event_bus
-                                .send(Event::Tui(TuiEvent::SelectedModel(model.clone())))
-                                .map_err(|err| TuiError::TokioSendError(err.to_string()))?;
+                    let socket_addr = self.connected_client_addr.unwrap();
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = WorkerGateway::worker_disconnected(self.rlpg_event_bus.clone(), &socket_addr) => self.handle_worker_disconnect(),
+                        v = Self::launch_choose_model_menu(cancellation_token.clone()) => match v {
+                            Ok(TuiChooseModelMenuOption::SelectModel(model)) => {
+                                self.current_worker_gateway_bg_task =
+                                    CurrentFuture::LoadModel(tokio::spawn(WorkerGateway::load_model(
+                                        self.rlpg_event_bus.clone(),
+                                        self.connected_client_addr.unwrap(),
+                                        model,
+                                    )));
 
-                            tui_screen = TuiScreen::WaitUntilWorkerLoadsModel;
-                        }
-                        TuiChooseModelMenuOption::Exit => tui_screen = TuiScreen::Menu,
-                    }
+                                self.tui_screen = TuiScreen::WaitUntilWorkerLoadsModel;
+                            },
+                            Ok(TuiChooseModelMenuOption::Exit) => self.tui_screen = TuiScreen::Menu,
+                            Err(e) => return Err(e),
+                        },
+                    };
                 }
                 TuiScreen::WaitUntilWorkerLoadsModel => {
                     execute!(
@@ -297,16 +335,29 @@ impl Tui {
                         ResetColor,
                     )?;
 
-                    loop {
-                        let received = match self.event_bus.receive().await {
-                            Ok(Event::Server(ServerEvent::WorkerLoadedModel(model_type))) => {
-                                model_type
-                            }
-                            _ => continue,
-                        };
+                    let load_model_task = match self.current_worker_gateway_bg_task {
+                        CurrentFuture::LoadModel(ref mut handle) => handle,
+                        _ => unreachable!(),
+                    };
 
-                        tui_screen = TuiScreen::WritePrompt;
-                    }
+                    let socket_addr = self.connected_client_addr.unwrap();
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = WorkerGateway::worker_disconnected(self.rlpg_event_bus.clone(), &socket_addr) => self.handle_worker_disconnect(),
+                        result = load_model_task => {
+                            match result {
+                                Ok(_) => self.tui_screen = TuiScreen::WritePrompt,
+                                Err(e) => {
+                                    let message = format!("Error loading model: {:?}", e);
+
+                                    tracing::error!(message);
+                                    self.tui_screen = TuiScreen::Error(message, Box::new(TuiScreen::ChooseModel));
+                                }
+                            }
+
+                            self.current_worker_gateway_bg_task = CurrentFuture::None;
+                        }
+                    };
                 }
                 TuiScreen::WaitUntilWorkerConnects => {
                     execute!(
@@ -316,23 +367,51 @@ impl Tui {
                         Print("Waiting for client to connect...")
                     )?;
 
-                    loop {
-                        match self.event_bus.receive().await {
-                            Ok(Event::Server(ServerEvent::ClientConnected(addr))) => {
-                                self.connected_client_addr = Some(addr);
-                                tui_screen = TuiScreen::ChooseModel;
-                                break;
-                            }
-                            _ => continue,
-                        };
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Err(TuiError::Cancelled),
+                        addr = WorkerGateway::worker_connected(self.rlpg_event_bus.clone()) => {
+                            self.connected_client_addr = Some(addr);
+                            self.tui_screen = TuiScreen::Menu;
+                        },
                     }
                 }
                 TuiScreen::WritePrompt => {
-                    let prompt = self
-                        .launch_write_prompt_menu(cancellation_token.clone())
-                        .await?;
+                    let socket_addr = self.connected_client_addr.unwrap();
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = WorkerGateway::worker_disconnected(self.rlpg_event_bus.clone(), &socket_addr) => self.handle_worker_disconnect(),
+                        prompt = self.launch_write_prompt_menu(cancellation_token.clone()) => {
+                            let prompt = prompt?;
+                            panic!("{prompt}");
+                        }
+                    };
+                }
+                TuiScreen::Error(message, next_screen) => {
+                    execute!(
+                        std::io::stdout(),
+                        Clear(ClearType::All),
+                        MoveTo(0, 0),
+                        Print(message),
+                    )?;
 
-                    panic!("{:?}", prompt);
+                    println!("");
+
+                    execute!(std::io::stdout(), Print("Press enter to continue."));
+
+                    let mut stdin = tokio::io::stdin();
+
+                    loop {
+                        tokio::select! {
+                            _ = cancellation_token.cancelled() => return Err(TuiError::Cancelled),
+                            Ok(character) = stdin.read_u8() => {
+                                if character == '\n' as u8 {
+                                    let next_screen: TuiScreen = (&**next_screen).clone(); // idk wtf is going on here, but it compiles
+                                    self.tui_screen = next_screen;
+                                    break;
+                                }
+                            },
+                        };
+                    }
                 }
             }
         }
