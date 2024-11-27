@@ -1,5 +1,8 @@
 use prost::{Message, Oneof};
-use std::ops::{Deref, DerefMut};
+use std::{
+    fmt::Display,
+    ops::{Deref, DerefMut},
+};
 
 pub mod master;
 pub mod worker;
@@ -72,5 +75,53 @@ where
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.result
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ConversionError;
+
+impl Display for ConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "conversion error")
+    }
+}
+
+impl<T, E> TryInto<Result<T, E>> for ProtoResultWrapper<T, E>
+where
+    T: Message + Default + Clone + PartialEq + Eq,
+    E: Message + Default + Clone + PartialEq + Eq,
+{
+    type Error = ConversionError;
+
+    fn try_into(self) -> Result<Result<T, E>, Self::Error> {
+        match self.result {
+            Some(ProtoResult::Ok(t)) => Ok(Ok(t)),
+            Some(ProtoResult::Err(e)) => Ok(Err(e)),
+            None => Err(ConversionError),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+
+    use crate::master::{GenerateCommand, MasterMessage, ModelType, Packet};
+
+    #[test]
+    pub fn it_encodes_and_decodes_to_the_same_data() {
+        let packet = Packet::new(MasterMessage::GenerateCommand(GenerateCommand::new(
+            1,
+            ModelType::Llama3v2_1B,
+            "write me a poem".to_string(),
+        )));
+
+        let mut buf = Vec::new();
+        packet.encode(&mut buf).unwrap();
+
+        let decoded_packet = Packet::decode(&mut buf.as_slice()).unwrap();
+
+        assert_eq!(decoded_packet, packet);
     }
 }

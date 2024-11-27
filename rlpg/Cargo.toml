@@ -1,0 +1,10 @@
+[package]
+name = "rlpg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures = "0.3.31"
+thiserror = "2.0.3"
+tokio = { version = "1.41.1", features = ["full"] }
+tokio-util = "0.7.12"
