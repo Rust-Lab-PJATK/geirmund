@@ -41,14 +41,14 @@ impl From<tokio::io::Error> for RunServerError {
 }
 
 async fn disconnect_the_client_on_event(
-    event: RLPGEvent,
+    event: &RLPGEvent,
     socket: &mut TcpStream,
     socket_event_bus: &mut RLPGEventBus,
     socket_addr: &SocketAddr,
 ) -> Result<bool, RunServerError> {
     match event {
         RLPGEvent::DisconnectTheClient(addr) => {
-            if addr != *socket_addr {
+            if *addr != *socket_addr {
                 return Ok(false);
             }
 
@@ -61,6 +61,24 @@ async fn disconnect_the_client_on_event(
         }
         _ => return Ok(false),
     }
+}
+
+pub async fn send_new_packet_on_event(
+    event: &RLPGEvent,
+    socket: &mut TcpStream,
+    socket_addr: &SocketAddr,
+) -> Result<(), RunServerError> {
+    match event {
+        RLPGEvent::SendNewPacket((data, target_socket_addr)) => {
+            if *target_socket_addr != *socket_addr {
+                return Ok(());
+            }
+            socket.write_all(&data).await?;
+        }
+        _ => {}
+    };
+
+    Ok(())
 }
 
 pub fn run_on_socket(
@@ -89,9 +107,13 @@ pub fn run_on_socket(
                     };
                 },
                 ev = socket_event_bus.receive() => {
-                    if disconnect_the_client_on_event(ev, &mut socket, &mut socket_event_bus, &socket_addr).await? {
+                    if disconnect_the_client_on_event(&ev, &mut socket, &mut socket_event_bus, &socket_addr).await? {
                         return Ok(());
                     }
+
+                    send_new_packet_on_event(&ev, &mut socket, &socket_addr).await?;
+
+                    continue;
                 },
             };
 
@@ -99,7 +121,7 @@ pub fn run_on_socket(
                 Ok(Some(parsed_data)) => {
                     socket_event_bus
                         .sender
-                        .send(RLPGEvent::NewPacket((parsed_data, socket_addr)))?;
+                        .send(RLPGEvent::NewPacketReceived((parsed_data, socket_addr)))?;
 
                     parser = RLPGParser::new();
                 }
@@ -165,7 +187,8 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RLPGEvent {
     ClientConnected(SocketAddr),
-    NewPacket((Vec<u8>, SocketAddr)),
+    NewPacketReceived((Vec<u8>, SocketAddr)),
+    SendNewPacket((Vec<u8>, SocketAddr)),
     ClientDisconnected((DisconnectReason, SocketAddr)),
     DisconnectTheClient(SocketAddr),
 }
@@ -268,7 +291,7 @@ mod tests {
         dbg!(event.clone());
 
         assert!(
-            matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet.0)
+            matches!(event, RLPGEvent::NewPacketReceived(packet) if b"Hello world".to_vec() == packet.0)
         );
 
         let _ = server_fut.await.unwrap();
@@ -297,7 +320,7 @@ mod tests {
         cancellation_token.cancel();
 
         assert!(
-            matches!(event, RLPGEvent::NewPacket(packet) if b"Hello world".to_vec() == packet.0)
+            matches!(event, RLPGEvent::NewPacketReceived(packet) if b"Hello world".to_vec() == packet.0)
         );
 
         let _ = server_fut.await.unwrap();

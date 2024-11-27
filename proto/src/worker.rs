@@ -1,4 +1,4 @@
-use crate::{ProtoResult, ProtoResultWrapper};
+use crate::{ConversionError, ProtoResult, ProtoResultWrapper};
 use prost::{Message, Oneof};
 
 #[derive(Message, Clone, Eq, PartialEq)]
@@ -40,6 +40,14 @@ pub struct LoadResponse {
 pub struct WorkerErrorWrapper {
     #[prost(oneof = "WorkerError", tags = "1, 2, 3, 4, 5")]
     pub err: Option<WorkerError>,
+}
+
+impl TryInto<WorkerError> for WorkerErrorWrapper {
+    type Error = ConversionError;
+
+    fn try_into(self) -> Result<WorkerError, Self::Error> {
+        self.err.ok_or(ConversionError)
+    }
 }
 
 #[derive(Oneof, Clone, PartialEq, Eq)]

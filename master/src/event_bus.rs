@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use proto::master::ModelType;
+use proto::{master::ModelType, worker::WorkerError};
 use tokio::sync::broadcast::{
     self,
     error::{RecvError, SendError},
@@ -19,8 +19,8 @@ pub enum Event {
 
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    WorkerLoadedModel(ModelType),
-    WorkerGeneratedResponse(String),
+    LoadModelResponse(Result<(), WorkerError>),
+    GenerateOutputResponse(Result<String, WorkerError>),
     ClientConnected(SocketAddr),
     ClientDisconnected,
 }

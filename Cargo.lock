@@ -1027,6 +1027,7 @@ dependencies = [
  "futures",
  "prost",
  "proto",
+ "rand",
  "rlpg",
  "thiserror 2.0.3",
  "tokio",
