@@ -7,7 +7,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::RLPGParser;
+use crate::{RLPGParser, VERSION};
 
 pub struct RLPGTcpListener {
     event_bus: RLPGEventBus,
@@ -69,11 +69,15 @@ pub async fn send_new_packet_on_event(
     socket_addr: &SocketAddr,
 ) -> Result<(), RunServerError> {
     match event {
-        RLPGEvent::SendNewPacket((data, target_socket_addr)) => {
+        RLPGEvent::SendNewPacket((content, target_socket_addr)) => {
             if *target_socket_addr != *socket_addr {
                 return Ok(());
             }
-            socket.write_all(&data).await?;
+
+            let content_length = content.len();
+            let header = format!("RLPG/{VERSION}\n{content_length}\n\n");
+            socket.write_all(&header.as_bytes()).await?;
+            socket.write_all(&content).await?;
         }
         _ => {}
     };
@@ -236,12 +240,12 @@ mod tests {
     use std::time::Duration;
 
     use tokio::{
-        io::{AsyncWriteExt, Interest},
+        io::{AsyncReadExt, AsyncWriteExt, Interest},
         net::{TcpSocket, TcpStream},
     };
     use tokio_util::sync::CancellationToken;
 
-    use crate::tcp::RLPGEvent;
+    use crate::{tcp::RLPGEvent, VERSION};
 
     use super::{DisconnectReason, RLPGEventBus, RLPGTcpListener};
 
@@ -285,10 +289,11 @@ mod tests {
         send_data_to_server("127.0.0.1:4340", vec![b"Hello world".to_vec()], false).await;
 
         let event = event_bus.receive().await;
+        assert!(matches!(event, RLPGEvent::ClientConnected(_)));
+
+        let event = event_bus.receive().await;
 
         cancellation_token.cancel();
-
-        dbg!(event.clone());
 
         assert!(
             matches!(event, RLPGEvent::NewPacketReceived(packet) if b"Hello world".to_vec() == packet.0)
@@ -314,6 +319,9 @@ mod tests {
             true,
         )
         .await;
+
+        let event = event_bus.receive().await;
+        assert!(matches!(event, RLPGEvent::ClientConnected(_)));
 
         let event = event_bus.receive().await;
 
@@ -346,6 +354,9 @@ mod tests {
         client.flush().await.unwrap();
 
         let event = event_bus.receive().await;
+        assert!(matches!(event, RLPGEvent::ClientConnected(_)));
+
+        let event = event_bus.receive().await;
 
         assert!(
             matches!(event, RLPGEvent::ClientDisconnected((reason, _)) if reason == DisconnectReason::InvalidByte)
@@ -358,5 +369,50 @@ mod tests {
 
         cancellation_token.cancel();
         let _ = server_fut.await;
+    }
+
+    #[tokio::test]
+    pub async fn test_tcp_server_sends_valid_payload_on_send_new_packet_event() {
+        let mut event_bus = RLPGEventBus::new();
+        let server = RLPGTcpListener::new(event_bus.clone());
+
+        let cancellation_token = CancellationToken::new();
+
+        let server_cancel_token = cancellation_token.clone();
+        let server_fut =
+            tokio::spawn(async move { server.run("0.0.0.0:4342", server_cancel_token).await });
+
+        let mut client = TcpStream::connect("127.0.0.1:4342").await.unwrap();
+
+        let event = event_bus.receive().await;
+        assert!(matches!(event, RLPGEvent::ClientConnected(_)));
+
+        let socket_addr = match event {
+            RLPGEvent::ClientConnected(socket_addr) => socket_addr,
+            _ => panic!("Expected ClientConnected event."),
+        };
+
+        event_bus
+            .send(RLPGEvent::SendNewPacket((
+                "Hello world!".as_bytes().to_vec(),
+                socket_addr,
+            )))
+            .unwrap();
+
+        let correct_payload = format!("RLPG/{}\n12\n\nHello world!", VERSION);
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        while buf.len() < correct_payload.len() {
+            let byte = client.read_u8().await.unwrap();
+            buf.push(byte);
+        }
+
+        let read = client.try_read(&mut buf).is_err();
+
+        cancellation_token.cancel();
+
+        assert!(String::from_utf8(buf).unwrap() == correct_payload);
+        assert!(read);
     }
 }

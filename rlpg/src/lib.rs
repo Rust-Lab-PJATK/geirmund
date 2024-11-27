@@ -63,8 +63,6 @@ impl RLPGParser {
             return Ok(false);
         }
 
-        dbg!(self.current_index, self.buffer.len(), self.buffer.clone());
-
         while self.current_index < self.buffer.len() && self.current_index < STARTING_PAYLOAD.len()
         {
             if starting_payload[self.current_index] != self.buffer[self.current_index] {
@@ -77,14 +75,10 @@ impl RLPGParser {
             self.current_index += 1;
         }
 
-        println!("1");
-
         assert!(
             self.current_index <= STARTING_PAYLOAD.len(),
             "Current index must not be greater than length of starting payload."
         );
-
-        println!("{} == {}", STARTING_PAYLOAD.len(), self.current_index);
 
         Ok(STARTING_PAYLOAD.len() == self.current_index)
     }
@@ -94,10 +88,7 @@ impl RLPGParser {
             if self.buffer[self.current_index] == b'\n' {
                 let bytes = match self.state {
                     RLPGParserState::ParsingContentLengthInHeader(ref vec) => vec,
-                    _ => panic!(
-                        "Expected ParsingContentLengthInHeader state, received: {:?}",
-                        self.state
-                    ),
+                    _ => unreachable!(),
                 };
 
                 let content_length: usize = String::from_utf8(bytes.clone())?
@@ -145,7 +136,6 @@ impl RLPGParser {
 
         while *occured_times != 2 && self.buffer.len() > self.current_index {
             if self.buffer[self.current_index] != b'\n' {
-                dbg!(self.buffer[self.current_index] as char, *occured_times);
                 return Err(ParsingError::InvalidByte(
                     self.buffer[self.current_index],
                     self.current_index,
