@@ -63,17 +63,23 @@ async fn disconnect_the_client_on_event(
     }
 }
 
-pub async fn send_new_packet_on_event(
+async fn send_new_packet_on_event(
     event: &RLPGEvent,
     socket: &mut TcpStream,
     socket_addr: &SocketAddr,
 ) -> Result<(), RunServerError> {
     match event {
-        RLPGEvent::SendNewPacket((content, target_socket_addr)) => {
+        RLPGEvent::SendNewPacketToParticularClient((content, target_socket_addr)) => {
             if *target_socket_addr != *socket_addr {
                 return Ok(());
             }
 
+            let content_length = content.len();
+            let header = format!("RLPG/{VERSION}\n{content_length}\n\n");
+            socket.write_all(&header.as_bytes()).await?;
+            socket.write_all(&content).await?;
+        }
+        RLPGEvent::SendNewPacket(content) => {
             let content_length = content.len();
             let header = format!("RLPG/{VERSION}\n{content_length}\n\n");
             socket.write_all(&header.as_bytes()).await?;
@@ -192,7 +198,8 @@ pub enum DisconnectReason {
 pub enum RLPGEvent {
     ClientConnected(SocketAddr),
     NewPacketReceived((Vec<u8>, SocketAddr)),
-    SendNewPacket((Vec<u8>, SocketAddr)),
+    SendNewPacketToParticularClient((Vec<u8>, SocketAddr)),
+    SendNewPacket(Vec<u8>),
     ClientDisconnected((DisconnectReason, SocketAddr)),
     DisconnectTheClient(SocketAddr),
 }
@@ -393,7 +400,7 @@ mod tests {
         };
 
         event_bus
-            .send(RLPGEvent::SendNewPacket((
+            .send(RLPGEvent::SendNewPacketToParticularClient((
                 "Hello world!".as_bytes().to_vec(),
                 socket_addr,
             )))
