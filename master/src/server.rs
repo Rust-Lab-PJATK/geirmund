@@ -97,7 +97,7 @@ impl WorkerGateway {
 
         let packet_as_bytes = Self::convert_packet_to_bytes(packet)?;
 
-        rlpg_event_bus.send(RLPGEvent::SendNewPacket((packet_as_bytes, socket_addr)))?;
+        rlpg_event_bus.send(RLPGEvent::SendNewPacketToParticularClient((packet_as_bytes, socket_addr)))?;
 
         loop {
             let packet_payload =
@@ -142,7 +142,7 @@ impl WorkerGateway {
 
         let packet = Self::convert_packet_to_bytes(packet)?;
 
-        rlpg_event_bus.send(RLPGEvent::SendNewPacket((packet, socket_addr)))?;
+        rlpg_event_bus.send(RLPGEvent::SendNewPacketToParticularClient((packet, socket_addr)))?;
 
         loop {
             let packet =
