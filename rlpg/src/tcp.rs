@@ -9,35 +9,130 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{RLPGParser, VERSION};
 
+mod rlpg {
+    use std::net::SocketAddr;
+
+    use tokio_util::sync::CancellationToken;
+
+    pub mod error {
+        pub mod tcp_listener {
+            pub enum ReceiveFromClientError {}
+
+            pub enum ReceiveFromAllError {}
+
+            pub enum SendToAllError {}
+
+            pub enum SendToClientError {}
+
+            pub enum RunError {}
+        }
+
+        pub mod tcp_client {
+            pub enum SendError {}
+
+            pub enum ReceiveError {}
+
+            pub enum RunError {}
+
+            pub enum WaitForConnectError {}
+
+            pub enum WaitForDisconnectError {}
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct TcpListener {
+        //TODO
+    }
+
+    impl TcpListener {
+        pub fn new() -> Self {
+            Self {}
+        }
+
+        pub async fn receive_from_client(
+            &mut self,
+        ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromClientError> {
+            //TODO
+            Ok(Vec::new())
+        }
+
+        pub async fn receive_from_all(
+            &mut self,
+        ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromAllError> {
+            //TODO
+            Ok(Vec::new())
+        }
+
+        pub async fn send_to_client(
+            &mut self,
+            client_addr: SocketAddr,
+            payload: Vec<u8>,
+        ) -> Result<(), error::tcp_listener::SendToClientError> {
+            //TODO
+            Ok(())
+        }
+
+        pub async fn send_to_all(
+            &mut self,
+            payload: Vec<u8>,
+        ) -> Result<(), error::tcp_listener::SendToAllError> {
+            //TODO
+            Ok(())
+        }
+
+        pub async fn run(
+            &mut self,
+            addr: &str,
+            cancellation_token: CancellationToken,
+        ) -> Result<(), error::tcp_listener::RunError> {
+            Ok(())
+        }
+
+        // TODO: connect
+        // TODO: disconnect
+        // TODO: how many clients are connected
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct TcpClient {}
+
+    impl TcpClient {
+        pub fn new() -> Self {
+            Self {}
+        }
+
+        pub async fn wait_for_disconnect(
+            &mut self,
+        ) -> Result<(), error::tcp_client::WaitForDisconnectError> {
+            Ok(())
+        }
+
+        pub async fn wait_for_connect(
+            &mut self,
+        ) -> Result<(), error::tcp_client::WaitForConnectError> {
+            Ok(())
+        }
+
+        pub async fn send(&mut self, payload: Vec<u8>) -> Result<(), error::tcp_client::SendError> {
+            Ok(())
+        }
+
+        pub async fn receive(&mut self) -> Result<Vec<u8>, error::tcp_client::ReceiveError> {
+            Ok(Vec::new())
+        }
+
+        pub async fn run(
+            &mut self,
+            cancellation_token: CancellationToken,
+        ) -> Result<(), error::tcp_client::RunError> {
+            Ok(())
+        }
+    }
+}
+
 pub struct RLPGTcpListener {
     event_bus: RLPGEventBus,
-}
-
-#[derive(Error, Debug, Clone)]
-pub enum RunServerError {
-    #[error("IO error: {0}")]
-    IOError(Arc<tokio::io::Error>),
-
-    #[error("Failed to send event through event bus: {0}")]
-    SendError(Arc<SendError<RLPGEvent>>),
-}
-
-impl From<SendError<RLPGEvent>> for RunServerError {
-    fn from(value: SendError<RLPGEvent>) -> Self {
-        return RunServerError::SendError(Arc::new(value));
-    }
-}
-
-impl From<Arc<SendError<RLPGEvent>>> for RunServerError {
-    fn from(value: Arc<SendError<RLPGEvent>>) -> Self {
-        return RunServerError::SendError(value);
-    }
-}
-
-impl From<tokio::io::Error> for RunServerError {
-    fn from(value: tokio::io::Error) -> Self {
-        return RunServerError::IOError(Arc::new(value));
-    }
 }
 
 async fn disconnect_the_client_on_event(
@@ -91,19 +186,19 @@ async fn send_new_packet_on_event(
     Ok(())
 }
 
-pub fn run_on_socket(
+async fn run_on_socket(
     mut socket: TcpStream,
     cancellation_token: CancellationToken,
     mut socket_event_bus: RLPGEventBus,
-    socket_addr: SocketAddr,
 ) -> impl Future<Output = Result<(), RunServerError>> {
     async move {
+        let socket_addr = socket.peer_addr()?;
         let mut parser = RLPGParser::new();
 
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
-                res = socket.read_u8() => {
+                    res = socket.read_u8() => {
                     match res {
                         Ok(character) => parser.add_char_to_buffer(character),
                         Err(e) => {
@@ -116,7 +211,7 @@ pub fn run_on_socket(
                         }
                     };
                 },
-                ev = socket_event_bus.receive() => {
+                    ev = socket_event_bus.receive() => {
                     if disconnect_the_client_on_event(&ev, &mut socket, &mut socket_event_bus, &socket_addr).await? {
                         return Ok(());
                     }
@@ -165,7 +260,7 @@ impl RLPGTcpListener {
         loop {
             let (socket, addr) = tokio::select! {
                 res = listener.accept() => res?,
-                _ = cancellation_token.cancelled() => return Ok(())
+                    _ = cancellation_token.cancelled() => return Ok(())
             };
 
             let cancellation_token = cancellation_token.clone();
@@ -178,12 +273,7 @@ impl RLPGTcpListener {
                 );
             }
 
-            tokio::spawn(run_on_socket(
-                socket,
-                cancellation_token,
-                socket_event_bus,
-                addr,
-            ));
+            tokio::spawn(run_on_socket(socket, cancellation_token, socket_event_bus));
         }
     }
 }
@@ -195,17 +285,16 @@ pub enum DisconnectReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RLPGEvent {
+enum RLPGEvent {
     ClientConnected(SocketAddr),
     NewPacketReceived((Vec<u8>, SocketAddr)),
-    SendNewPacketToParticularClient((Vec<u8>, SocketAddr)),
-    SendNewPacket(Vec<u8>),
+    SendNewPacket((Vec<u8>, Option<SocketAddr>)),
     ClientDisconnected((DisconnectReason, SocketAddr)),
     DisconnectTheClient(SocketAddr),
 }
 
 #[derive(Debug)]
-pub struct RLPGEventBus {
+struct RLPGEventBus {
     sender: Sender<RLPGEvent>,
     consumer: Receiver<RLPGEvent>,
 }
@@ -239,6 +328,33 @@ impl RLPGEventBus {
                 _ => {}
             }
         }
+    }
+}
+
+#[derive(Error, Debug, Clone)]
+pub enum RunServerError {
+    #[error("IO error: {0}")]
+    IOError(Arc<tokio::io::Error>),
+
+    #[error("Failed to send event through event bus: {0}")]
+    SendError(Arc<SendError<RLPGEvent>>),
+}
+
+impl From<SendError<RLPGEvent>> for RunServerError {
+    fn from(value: SendError<RLPGEvent>) -> Self {
+        return RunServerError::SendError(Arc::new(value));
+    }
+}
+
+impl From<Arc<SendError<RLPGEvent>>> for RunServerError {
+    fn from(value: Arc<SendError<RLPGEvent>>) -> Self {
+        return RunServerError::SendError(value);
+    }
+}
+
+impl From<tokio::io::Error> for RunServerError {
+    fn from(value: tokio::io::Error) -> Self {
+        return RunServerError::IOError(Arc::new(value));
     }
 }
 
