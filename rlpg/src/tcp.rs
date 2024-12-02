@@ -11,6 +11,7 @@ use crate::{RLPGParser, VERSION};
 
 pub mod error {
     pub mod tcp_listener {
+        #[derive(Debug)]
         pub enum ReceiveFromClientError {}
 
         pub enum ReceiveFromAllError {}
@@ -59,16 +60,35 @@ impl TcpListener {
 
     pub async fn receive_from_client(
         &self,
+        socket_addr: &SocketAddr,
     ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromClientError> {
-        // TODO: finish this func
-        Ok(Vec::new())
+        let mut event_bus = self.event_bus.clone();
+
+        loop {
+            match event_bus.receive().await {
+                RLPGEvent::NewPacketReceived((packet, addr)) => {
+                    if *socket_addr == addr {
+                        continue;
+                    }
+
+                    return Ok(packet);
+                }
+                _ => {}
+            };
+        }
     }
 
     pub async fn receive_from_all(
         &self,
-    ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromAllError> {
-        // TODO: finish this func
-        Ok(Vec::new())
+    ) -> Result<(Vec<u8>, SocketAddr), error::tcp_listener::ReceiveFromAllError> {
+        let mut event_bus = self.event_bus.clone();
+
+        loop {
+            match event_bus.receive().await {
+                RLPGEvent::NewPacketReceived((packet, addr)) => return Ok((packet, addr)),
+                _ => {}
+            };
+        }
     }
 
     pub async fn send_to_client(
@@ -549,3 +569,64 @@ impl From<tokio::io::Error> for RunServerError {
 //        assert!(read);
 //    }
 //}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use crate::tcp::*;
+    use rand::random;
+
+    fn random_socket_addr() -> SocketAddr {
+        SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::new(
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+            )),
+            random(),
+        )
+    }
+
+    #[tokio::test]
+    pub async fn test_if_tcp_listener_receives_from_particular_client() {
+        let mut tcp_listener = TcpListener::new();
+
+        let hello_world = b"Hello world".as_slice().to_vec();
+        let socket_addr = random_socket_addr();
+
+        let borrowed_tcp_listener = tcp_listener.clone();
+        let borrowed_socket_addr = socket_addr.clone();
+        let fut = tokio::spawn(async move {
+            borrowed_tcp_listener
+                .receive_from_client(&borrowed_socket_addr)
+                .await
+        });
+
+        assert!(tcp_listener
+            .event_bus
+            .send(RLPGEvent::NewPacketReceived((
+                b"yoo".into(),
+                random_socket_addr()
+            )))
+            .is_ok());
+
+        assert!(tcp_listener
+            .event_bus
+            .send(RLPGEvent::NewPacketReceived((
+                hello_world.clone(),
+                socket_addr
+            )))
+            .is_ok());
+
+        let fut = tokio::join!(fut);
+
+        assert!(fut.0.unwrap().unwrap() == hello_world);
+    }
+
+    #[tokio::test]
+    pub async fn test_if_tcp_listener_receives_from_any_client() {
+        // TODO: complete
+    }
+}
