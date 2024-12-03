@@ -1,10 +1,10 @@
-use std::{net::SocketAddr, sync::Arc};
 use proto::{
-    master::{ModelType, Packet as MasterPacket, GenerateCommand, LoadCommand},
-    worker::{WorkerError, Packet as WorkerPacket, WorkerMessage},
+    master::{GenerateCommand, LoadCommand, ModelType, Packet as MasterPacket},
+    worker::{Packet as WorkerPacket, WorkerError, WorkerMessage},
     ConversionError,
 };
 use rlpg::tcp::{RLPGEvent, RLPGEventBus, RLPGTcpListener, RunServerError};
+use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::broadcast::error::SendError;
 use tokio_util::sync::CancellationToken;
@@ -37,17 +37,16 @@ impl WorkerGateway {
     ) -> Result<(), WorkerGatewayCommandError> {
         let request_id: u32 = Self::generate_new_request_id();
 
-        let packet = MasterPacket::new_load_command(
-            LoadCommand::new(request_id, model_type),
-        );
+        let packet = MasterPacket::new_load_command(LoadCommand::new(request_id, model_type));
 
-        // Strategy - first worker
         let mut eb = self.event_bus.clone();
-        eb.send(RLPGEvent::SendNewPacketToParticularClient((packet.encode_to_vec(), addr)))?;
+        eb.send(RLPGEvent::SendNewPacketToParticularClient((
+            packet.encode_to_vec(),
+            addr,
+        )))?;
 
         loop {
-            let packet_payload =
-                Self::recv_packet_from_addr(&mut eb, &addr).await?;
+            let packet_payload = Self::recv_packet_from_addr(&mut eb, &addr).await?;
 
             match packet_payload.msg {
                 Some(WorkerMessage::LoadResponse(load_response)) => {
@@ -73,20 +72,22 @@ impl WorkerGateway {
 
         let request_id = Self::generate_new_request_id();
 
-        let packet = MasterPacket::new_generate_command(
-            GenerateCommand::new(request_id, model_type, prompt)
-        );
+        let packet = MasterPacket::new_generate_command(GenerateCommand::new(
+            request_id, model_type, prompt,
+        ));
 
         // Strategy - first worker
         let mut eb = self.event_bus.to_owned();
         let workers = Arc::clone(&self.workers);
         let worker = Self::first_worker_strategy(workers.read().await.as_ref())?.clone();
-        
-        eb.send(RLPGEvent::SendNewPacketToParticularClient((packet.encode_to_vec(), worker)))?;
+
+        eb.send(RLPGEvent::SendNewPacketToParticularClient((
+            packet.encode_to_vec(),
+            worker,
+        )))?;
 
         loop {
-            let packet =
-                Self::recv_packet_from_addr(&mut eb, &worker).await?;
+            let packet = Self::recv_packet_from_addr(&mut eb, &worker).await?;
 
             match packet.msg {
                 Some(WorkerMessage::GenerateResponse(generate_response)) => {
@@ -105,7 +106,8 @@ impl WorkerGateway {
 
     pub async fn worker_disconnected(&self) -> SocketAddr {
         loop {
-            if let RLPGEvent::ClientDisconnected((_, addr)) = self.event_bus.clone().receive().await {
+            if let RLPGEvent::ClientDisconnected((_, addr)) = self.event_bus.clone().receive().await
+            {
                 return addr;
             }
         }
@@ -114,11 +116,11 @@ impl WorkerGateway {
     pub async fn worker_connected(&self) -> SocketAddr {
         loop {
             if let RLPGEvent::ClientConnected(addr) = self.event_bus.clone().receive().await {
-                return addr
+                return addr;
             }
         }
     }
-    
+
     fn generate_new_request_id() -> u32 {
         rand::random::<u32>()
     }
@@ -129,7 +131,9 @@ impl WorkerGateway {
     ) -> Result<WorkerPacket, DecodeError> {
         loop {
             let packet_payload = match rlpg_event_bus.receive().await {
-                RLPGEvent::NewPacketReceived((_, owner_addr)) if owner_addr != *socket_addr => continue,
+                RLPGEvent::NewPacketReceived((_, owner_addr)) if owner_addr != *socket_addr => {
+                    continue
+                }
                 RLPGEvent::NewPacketReceived((payload, _)) => payload,
                 _ => continue,
             };
@@ -137,8 +141,10 @@ impl WorkerGateway {
             return WorkerPacket::decode(&mut packet_payload.as_slice());
         }
     }
-    
-    fn first_worker_strategy(workers: &Vec<SocketAddr>) -> Result<&SocketAddr, WorkerGatewayCommandError> {
+
+    fn first_worker_strategy(
+        workers: &Vec<SocketAddr>,
+    ) -> Result<&SocketAddr, WorkerGatewayCommandError> {
         workers
             .first()
             .ok_or(WorkerGatewayCommandError::NoAvailableWorkers)
@@ -158,7 +164,7 @@ pub enum WorkerGatewayCommandError {
 
     #[error("failed to send a message through event bus: {0:?}")]
     EventBusSendError(#[from] Arc<SendError<RLPGEvent>>),
-    
+
     #[error("no available workers currently")]
     NoAvailableWorkers,
 
@@ -197,7 +203,9 @@ pub async fn run_tcp(
 
     // server_fut
     tokio::spawn(async move {
-        rlpg_server.run(&format!("0.0.0.0:{}", port), server_fut_cancel_token).await
+        rlpg_server
+            .run(&format!("0.0.0.0:{}", port), server_fut_cancel_token)
+            .await
     });
     cancellation_token.cancelled().await;
 
