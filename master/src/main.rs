@@ -1,78 +1,90 @@
+use std::sync::Arc;
+use clap::Parser;
 use futures::FutureExt;
-use rlpg::tcp::{RLPGEvent, RLPGEventBus};
-use server::WorkerGateway;
+use rlpg::tcp::RLPGEventBus;
+use worker_gateway::WorkerGateway;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tui::TuiError;
+use crate::cli::Args;
+use crate::client_gateway::ClientGateway;
 
-mod server;
-mod tui;
+mod worker_gateway;
+mod client_gateway;
+mod cli;
 
 #[tokio::main]
 async fn main() {
     std::env::set_var("RUST_LOG", "debug");
+    let args = Args::parse();
+    setup_tracing(&args.verbose, &args.logfile);
+    
+    tracing::info!("Starting master\n{}", include_str!("assets/master_ascii_art.txt"));
+    let cancellation_token = CancellationToken::new();
+    let rlpg_event_bus = RLPGEventBus::new();
+    let worker_gateway = Arc::new(WorkerGateway::new(rlpg_event_bus.clone()));
+    
+    let tcp_server_fut = Box::pin(worker_gateway::run_tcp(
+        args.workers_port,
+        cancellation_token.clone(),
+        rlpg_event_bus.clone(),
+    )).shared();
 
-    let subscriber = tracing_subscriber::fmt()
+    let workers_watcher_fut = Box::pin(
+        worker_gateway::run_workers_watcher(Arc::clone(&worker_gateway), cancellation_token.clone())
+    ).shared();
+
+    let client_gateway = ClientGateway::new(args.client_port, Arc::clone(&worker_gateway), cancellation_token.clone());
+    let http_server_fut = Box::pin(client_gateway.start()).shared();
+
+    let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })).shared();
+    
+    tokio::select! {
+        _ = tcp_server_fut.clone() => {},
+        _ = workers_watcher_fut.clone() => {},
+        _ = http_server_fut.clone() => {},
+        _ = signal_fut.clone() => {},
+    }
+    cancellation_token.cancel();
+
+    if let Err(e) = tcp_server_fut.await {
+        tracing::error!("{}", e);
+        eprintln!("Error occurred within tcp server: {e}");
+    }
+    
+    if let Err(e) = http_server_fut.await {
+        tracing::error!("{}", e);
+        eprintln!("Error occurred within http server: {e}");
+    }
+    
+    signal_fut.await;
+    tracing::info!("The ctrl+c signal listener has been closed.");
+}
+
+fn setup_tracing(verbose: &bool, logfile: &Option<String>) {
+    let logging_level = if *verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+    
+    let tracing_conf = tracing_subscriber::fmt()
         .compact()
         .with_level(true)
         .with_file(true)
         .with_line_number(true)
-        .with_max_level(Level::DEBUG) // TODO by env
-        .with_writer(
+        .with_max_level(logging_level);
+
+    if let Some(file) = logfile {
+        tracing_conf.with_writer(
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("master.log")
-                .unwrap(),
-        )
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
-    // disable raw mode, because when it is enabled it disables ctrl+c handling
-    _ = crossterm::terminal::disable_raw_mode();
-
-    let cancellation_token = CancellationToken::new();
-
-    let rlpg_event_bus = RLPGEventBus::new();
-
-    let mut tui = tui::Tui::new(rlpg_event_bus.clone());
-
-    let tui_fut = Box::pin(tui.run(cancellation_token.clone())).shared();
-    let server_fut = Box::pin(server::run(
-        String::from("127.0.0.1:4339"),
-        cancellation_token.clone(),
-        rlpg_event_bus,
-    ))
-    .shared();
-    let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
-        _ = tokio::signal::ctrl_c().await;
-    }))
-    .shared();
-
-    tokio::select! {
-        _ = server_fut.clone() => {},
-        _ = signal_fut.clone() => {},
-        _ = tui_fut.clone() => {},
-    };
-
-    cancellation_token.cancel();
-
-    if let Err(e) = tui_fut.await {
-        if e != TuiError::Cancelled {
-            tracing::error!("{}", e);
-            eprintln!("Error occured within TUI: {e}");
-        }
+                .open(file)
+                .expect("Couldn't open log file"),
+        ).init();
+    } else {
+        tracing_conf.with_writer(std::io::stdout).init();
     }
-
-    if let Err(e) = server_fut.await {
-        tracing::error!("{}", e);
-        eprintln!("Error occured within tcp server: {e}");
-    }
-
-    tracing::info!("The tcp listener has been closed.");
-
-    _ = signal_fut.await;
-
-    tracing::info!("The ctrl+c signal listener has been closed.");
 }
