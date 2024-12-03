@@ -4,6 +4,7 @@ use proto::{
     ConversionError,
 };
 use rlpg::tcp::{RLPGEvent, RLPGEventBus, RLPGTcpListener, RunServerError};
+use std::collections::BTreeSet;
 use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::broadcast::error::SendError;
@@ -14,7 +15,7 @@ use tokio::sync::RwLock;
 
 pub struct WorkerGateway {
     pub event_bus: RLPGEventBus,
-    pub workers: Arc<RwLock<Vec<SocketAddr>>>,
+    pub workers: Arc<RwLock<BTreeSet<SocketAddr>>>,
 }
 
 #[allow(dead_code)]
@@ -22,7 +23,7 @@ impl WorkerGateway {
     pub fn new(event_bus: RLPGEventBus) -> Self {
         Self {
             event_bus,
-            workers: Arc::new(RwLock::new(Vec::new())),
+            workers: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 
@@ -79,7 +80,7 @@ impl WorkerGateway {
         // Strategy - first worker
         let mut eb = self.event_bus.to_owned();
         let workers = Arc::clone(&self.workers);
-        let worker = Self::first_worker_strategy(workers.read().await.as_ref())?.clone();
+        let worker = Self::first_worker_strategy(&*workers.read().await)?.clone();
 
         eb.send(RLPGEvent::SendNewPacketToParticularClient((
             packet.encode_to_vec(),
@@ -143,7 +144,7 @@ impl WorkerGateway {
     }
 
     fn first_worker_strategy(
-        workers: &Vec<SocketAddr>,
+        workers: &BTreeSet<SocketAddr>,
     ) -> Result<&SocketAddr, WorkerGatewayCommandError> {
         workers
             .first()
@@ -217,10 +218,10 @@ pub async fn run_workers_watcher(worker_gateway: Arc<WorkerGateway>, cancel: Can
         tokio::select! {
             worker = worker_gateway.worker_connected() => {
                 let _ = worker_gateway.load_model(ModelType::Llama3v2_1B, worker).await;
-                worker_gateway.workers.write().await.push(worker);
+                worker_gateway.workers.write().await.insert(worker);
             },
             worker = worker_gateway.worker_disconnected() => {
-                worker_gateway.workers.write().await.retain(|w| *w != worker);
+                worker_gateway.workers.write().await.remove(&worker);
             }
         }
     }
