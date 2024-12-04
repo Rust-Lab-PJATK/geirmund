@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 
 use thiserror::Error;
 
+mod broadcast;
 pub mod tcp;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");

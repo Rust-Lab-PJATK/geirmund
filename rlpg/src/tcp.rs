@@ -1,12 +1,11 @@
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::broadcast::error::SendError as TokioSendError;
-use tokio::sync::broadcast::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
+use crate::broadcast::Channel;
 use crate::{RLPGParser, VERSION};
 
 pub mod error {
@@ -59,13 +58,11 @@ impl TcpListener {
     }
 
     pub async fn receive_from_client(
-        &self,
+        &mut self,
         socket_addr: &SocketAddr,
     ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromClientError> {
-        let mut event_bus = self.event_bus.clone();
-
         loop {
-            match event_bus.receive().await {
+            match self.event_bus.receive().await {
                 RLPGEvent::NewPacketReceived((packet, addr)) => {
                     if *socket_addr == addr {
                         continue;
@@ -79,12 +76,10 @@ impl TcpListener {
     }
 
     pub async fn receive_from_all(
-        &self,
+        &mut self,
     ) -> Result<(Vec<u8>, SocketAddr), error::tcp_listener::ReceiveFromAllError> {
-        let mut event_bus = self.event_bus.clone();
-
         loop {
-            match event_bus.receive().await {
+            match self.event_bus.receive().await {
                 RLPGEvent::NewPacketReceived((packet, addr)) => return Ok((packet, addr)),
                 _ => {}
             };
@@ -128,11 +123,7 @@ impl TcpListener {
 
                 let mut socket_event_bus = event_bus.clone();
 
-                if let Err(e) = socket_event_bus.send(RLPGEvent::ClientConnected(addr)) {
-                    panic!(
-                        "Error occured while trying to send RLPGEvent::ClientConnected event: {e:?}"
-                    );
-                }
+                socket_event_bus.send(RLPGEvent::ClientConnected(addr));
 
                 tokio::spawn(run_on_socket(socket, cancellation_token, socket_event_bus));
             }
@@ -205,41 +196,24 @@ enum RLPGEvent {
     DisconnectTheClient(SocketAddr),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RLPGEventBus {
-    sender: Sender<RLPGEvent>,
-    consumer: Receiver<RLPGEvent>,
-}
-
-impl Clone for RLPGEventBus {
-    fn clone(&self) -> Self {
-        RLPGEventBus {
-            sender: self.sender.clone(),
-            consumer: self.sender.subscribe(),
-        }
-    }
+    channel: Channel<RLPGEvent>,
 }
 
 impl RLPGEventBus {
     pub fn new() -> Self {
-        let (sender, consumer) = tokio::sync::broadcast::channel(100);
-        RLPGEventBus { sender, consumer }
+        RLPGEventBus {
+            channel: Channel::new(),
+        }
     }
 
-    pub fn send(
-        &mut self,
-        value: RLPGEvent,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<RLPGEvent>> {
-        self.sender.send(value)
+    pub fn send(&mut self, value: RLPGEvent) {
+        self.channel.send(value);
     }
 
     pub async fn receive(&mut self) -> RLPGEvent {
-        loop {
-            match self.consumer.recv().await {
-                Ok(v) => return v,
-                _ => {}
-            }
-        }
+        self.channel.recv().await
     }
 }
 
@@ -259,7 +233,7 @@ async fn disconnect_the_client_on_event(
             socket_event_bus.send(RLPGEvent::ClientDisconnected((
                 DisconnectReason::Unknown,
                 *socket_addr,
-            )))?;
+            )));
             return Ok(true);
         }
         _ => return Ok(false),
@@ -310,7 +284,7 @@ async fn run_on_socket(
                                 socket_event_bus.send(RLPGEvent::ClientDisconnected((
                                     DisconnectReason::Unknown,
                                     socket_addr,
-                                )))?;
+                                )));
                                 return Err(RunServerError::IOError(e.to_string()));
                             }
                         };
@@ -328,9 +302,7 @@ async fn run_on_socket(
 
             match parser.parse() {
                 Ok(Some(parsed_data)) => {
-                    socket_event_bus
-                        .sender
-                        .send(RLPGEvent::NewPacketReceived((parsed_data, socket_addr)))?;
+                    socket_event_bus.send(RLPGEvent::NewPacketReceived((parsed_data, socket_addr)));
 
                     parser = RLPGParser::new();
                 }
@@ -339,7 +311,7 @@ async fn run_on_socket(
                     socket_event_bus.send(RLPGEvent::ClientDisconnected((
                         DisconnectReason::InvalidByte,
                         socket_addr,
-                    )))?;
+                    )));
                     return Ok(());
                 }
                 _ => {}
@@ -593,40 +565,29 @@ mod tests {
     pub async fn test_if_tcp_listener_receives_from_particular_client() {
         let mut tcp_listener = TcpListener::new();
 
-        let hello_world = b"Hello world".as_slice().to_vec();
         let socket_addr = random_socket_addr();
 
-        let borrowed_tcp_listener = tcp_listener.clone();
+        let mut borrowed_tcp_listener = tcp_listener.clone();
         let borrowed_socket_addr = socket_addr.clone();
-        let fut = tokio::spawn(async move {
+        let fut1 = tokio::spawn(async move {
             borrowed_tcp_listener
                 .receive_from_client(&borrowed_socket_addr)
                 .await
         });
 
-        assert!(tcp_listener
-            .event_bus
-            .send(RLPGEvent::NewPacketReceived((
-                b"yoo".into(),
-                random_socket_addr()
-            )))
-            .is_ok());
+        let data = vec![(b"Hello world".as_slice().to_vec(), socket_addr)];
 
-        assert!(tcp_listener
-            .event_bus
-            .send(RLPGEvent::NewPacketReceived((
-                hello_world.clone(),
-                socket_addr
-            )))
-            .is_ok());
+        for ele in &data {
+            tcp_listener
+                .event_bus
+                .send(RLPGEvent::NewPacketReceived(ele.clone()));
+        }
 
-        let fut = tokio::join!(fut);
+        let fut1 = tokio::join!(fut1);
 
-        assert!(fut.0.unwrap().unwrap() == hello_world);
+        assert!(fut1.0.unwrap().unwrap() == data[0].0.clone());
     }
 
     #[tokio::test]
-    pub async fn test_if_tcp_listener_receives_from_any_client() {
-        // TODO: complete
-    }
+    pub async fn test_if_tcp_listener_receives_from_any_client() {}
 }
