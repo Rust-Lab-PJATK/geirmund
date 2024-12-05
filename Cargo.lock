@@ -2586,7 +2586,6 @@ name = "worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "candle-core",
  "candle-nn",
  "candle-transformers",
