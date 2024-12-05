@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     version = "0.1.0", 
-    about = "Geirmund worker servers partial inference for LLM models", 
+    about = "Geirmund worker serves partial inference for LLM models", 
     long_about = None
 )]
 pub struct Args {

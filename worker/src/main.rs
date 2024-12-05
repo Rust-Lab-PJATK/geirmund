@@ -4,7 +4,9 @@ use candle_core::{CudaDevice, Device};
 use clap::Parser;
 use proto::master::Packet as MasterPacket;
 use proto::worker::Packet as WorkerPacket;
+use rlpg::tcp::{run_on_socket, RLPGEventBus};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
@@ -12,7 +14,6 @@ use worker::cli::Args;
 use worker::handler::{handle_packet, handle_read, handle_write};
 use worker::inference::guard::TextModelGuard;
 use worker::inference::{TextModelConfig, TextModelFiles};
-use worker::tcp::Client;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,7 +40,17 @@ async fn main() -> Result<()> {
         args.weights,
     ));
     let model = Arc::new(TextModelGuard::empty());
-    let client = Client::connect(format!("{}:{}", args.host, args.port)).await?;
+
+    let event_bus = RLPGEventBus::new();
+    let stream = TcpStream::connect(format!("{}:{}", args.host, args.port)).await?;
+    tracing::info!("Connected to master");
+    let addr = stream.peer_addr()?;
+    tokio::spawn(run_on_socket(
+        stream,
+        CancellationToken::new(),
+        event_bus.clone(),
+        addr,
+    ));
 
     let cancellation_token = CancellationToken::new();
     let cancel = cancellation_token.run_until_cancelled(async {
@@ -48,8 +59,12 @@ async fn main() -> Result<()> {
 
     let (itx, irx) = mpsc::channel::<MasterPacket>(32);
     let (otx, orx) = mpsc::channel::<WorkerPacket>(32);
-    tokio::spawn(handle_read(client.reader, itx, cancellation_token.clone()));
-    tokio::spawn(handle_write(client.writer, orx));
+    tokio::spawn(handle_read(
+        event_bus.clone(),
+        itx,
+        cancellation_token.clone(),
+    ));
+    tokio::spawn(handle_write(event_bus.clone(), orx));
     tokio::spawn(handle_packet(irx, otx, model, config, files));
 
     cancel.await;

@@ -1,8 +1,8 @@
 use crate::inference::guard::TextModelGuard;
 use crate::inference::llama::LLama;
 use crate::inference::{TextModel, TextModelConfig, TextModelFiles};
-use crate::tcp::connection::{ConnectionReader, ConnectionWriter};
 use anyhow::Error as E;
+use prost::Message;
 use proto::master::{
     GenerateCommand, LoadCommand, MasterMessage, ModelType, Packet as MasterPacket,
 };
@@ -10,15 +10,16 @@ use proto::worker::{
     GenerateResponse, LoadResponse, Packet as WorkerPacket, WorkerError, WorkerErrorContent,
 };
 use proto::ProtoResult;
+use rlpg::tcp::{RLPGEvent, RLPGEventBus};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
 #[tracing::instrument(skip_all)]
-pub async fn handle_write(mut writer: ConnectionWriter, mut orx: Receiver<WorkerPacket>) {
+pub async fn handle_write(mut eb: RLPGEventBus, mut orx: Receiver<WorkerPacket>) {
     while let Some(packet) = orx.recv().await {
-        match writer.write_packet(&packet).await {
-            Ok(()) => tracing::debug!("Response sent to master"),
+        match eb.send(RLPGEvent::SendNewPacket(packet.encode_to_vec())) {
+            Ok(_) => tracing::debug!("Response sent to master"),
             Err(err) => tracing::error!("Write packet: {}", err),
         }
     }
@@ -26,14 +27,18 @@ pub async fn handle_write(mut writer: ConnectionWriter, mut orx: Receiver<Worker
 
 #[tracing::instrument(skip_all)]
 pub async fn handle_read(
-    mut reader: ConnectionReader,
+    mut eb: RLPGEventBus,
     itx: Sender<MasterPacket>,
     cancellation_token: CancellationToken,
 ) {
     while !cancellation_token.is_cancelled() {
         let reading = async {
-            if let Some(packet) = reader.read_packet().await? {
-                itx.send(packet).await?;
+            match eb.receive().await {
+                RLPGEvent::NewPacketReceived((bytes, _)) => {
+                    let packet = MasterPacket::decode(bytes.as_slice())?;
+                    itx.send(packet).await?;
+                }
+                _ => {}
             }
             Ok::<(), E>(())
         };
@@ -124,6 +129,7 @@ fn handle_generate(msg: GenerateCommand, model: Arc<TextModelGuard>, otx: Sender
             Some(g) => match g.generate(msg.prompt) {
                 Ok(answer) => {
                     tracing::info!("Generated: {} tokens", answer.len());
+                    tracing::info!("Generated: {}", answer);
                     ProtoResult::Ok(GenerateResponse::new(msg.id, answer))
                 }
                 Err(err) => {
