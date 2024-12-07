@@ -92,7 +92,7 @@ impl TcpListenerGateway {
         loop {
             match self.event_bus.receive().await {
                 RLPGEvent::NewPacketReceived((packet, addr)) => {
-                    if *socket_addr == addr {
+                    if *socket_addr != addr {
                         continue;
                     }
 
@@ -562,52 +562,118 @@ impl From<tokio::io::Error> for RunServerError {
 //    }
 //}
 
-//#[cfg(test)]
-//mod tests {
-//    use std::net::Ipv4Addr;
-//
-//    use crate::tcp::*;
-//    use rand::random;
-//
-//    fn random_socket_addr() -> SocketAddr {
-//        SocketAddr::new(
-//            std::net::IpAddr::V4(Ipv4Addr::new(
-//                random::<u8>() % 254,
-//                random::<u8>() % 254,
-//                random::<u8>() % 254,
-//                random::<u8>() % 254,
-//            )),
-//            random(),
-//        )
-//    }
-//
-//    #[tokio::test]
-//    pub async fn test_if_tcp_listener_receives_from_particular_client() {
-//        let mut tcp_listener = TcpListener::new();
-//
-//        let socket_addr = random_socket_addr();
-//
-//        let mut borrowed_tcp_listener = tcp_listener.clone();
-//        let borrowed_socket_addr = socket_addr.clone();
-//        let fut1 = tokio::spawn(async move {
-//            borrowed_tcp_listener
-//                .receive_from_client(&borrowed_socket_addr)
-//                .await
-//        });
-//
-//        let data = vec![(b"Hello world".as_slice().to_vec(), socket_addr)];
-//
-//        for ele in &data {
-//            tcp_listener
-//                .event_bus
-//                .send(RLPGEvent::NewPacketReceived(ele.clone()));
-//        }
-//
-//        let fut1 = tokio::join!(fut1);
-//
-//        assert!(fut1.0.unwrap().unwrap() == data[0].0.clone());
-//    }
-//
-//    #[tokio::test]
-//    pub async fn test_if_tcp_listener_receives_from_any_client() {}
-//}
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::Ipv4Addr,
+        sync::{atomic::AtomicU16, Arc, LazyLock},
+    };
+
+    use crate::tcp::*;
+    use rand::random;
+    use tokio::sync::{oneshot, Mutex};
+
+    static LAST_SOCKET_PORT: LazyLock<Arc<Mutex<u16>>> =
+        LazyLock::new(|| Arc::new(Mutex::new(4038)));
+
+    async fn get_next_socket_port() -> u16 {
+        let value_under_lazy_lock = LAST_SOCKET_PORT.clone();
+        let ptr_to_value_under_mutex = &mut *value_under_lazy_lock.lock().await;
+        *ptr_to_value_under_mutex = *ptr_to_value_under_mutex + 1;
+        return *ptr_to_value_under_mutex;
+    }
+
+    fn random_socket_addr() -> SocketAddr {
+        SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::new(
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+                random::<u8>() % 254,
+            )),
+            random(),
+        )
+    }
+
+    #[tokio::test]
+    pub async fn test_if_tcp_listener_receives_from_particular_client() {
+        let cancellation_token = CancellationToken::new();
+        let mut tcp_listener = TcpListenerGateway::run(
+            &format!("0.0.0.0:{}", get_next_socket_port().await),
+            cancellation_token.clone(),
+        )
+        .await
+        .unwrap();
+        let mut event_bus = tcp_listener.event_bus.clone();
+
+        let socket_addr = random_socket_addr();
+
+        let borrowed_socket_addr = socket_addr.clone();
+        let (future_confirmation_sender, future_confirmation_receiver) = oneshot::channel::<bool>();
+        let fut1 = tokio::spawn(async move {
+            future_confirmation_sender.send(true).unwrap();
+            tcp_listener
+                .receive_from_client(&borrowed_socket_addr)
+                .await
+        });
+
+        future_confirmation_receiver.await.unwrap();
+
+        let data = vec![
+            (
+                b"some other payload".as_slice().to_vec(),
+                random_socket_addr(),
+            ),
+            (b"Hello world".as_slice().to_vec(), socket_addr),
+        ];
+
+        for ele in &data {
+            event_bus
+                .send(RLPGEvent::NewPacketReceived(ele.clone()))
+                .unwrap();
+        }
+
+        let fut1 = tokio::join!(fut1);
+        let future_result = fut1.0.unwrap().unwrap();
+
+        assert!(future_result == data[1].0.clone());
+    }
+
+    #[tokio::test]
+    pub async fn test_if_tcp_listener_receives_from_any_client() {
+        let cancellation_token = CancellationToken::new();
+        let mut tcp_listener = TcpListenerGateway::run(
+            &format!("0.0.0.0:{}", get_next_socket_port().await),
+            cancellation_token.clone(),
+        )
+        .await
+        .unwrap();
+        let mut event_bus = tcp_listener.event_bus.clone();
+
+        // wait until future is ready
+        let (future_confirmation_sender, future_confirmation_receiver) = oneshot::channel::<bool>();
+        let fut1 = tokio::spawn(async move {
+            future_confirmation_sender.send(true).unwrap();
+            tcp_listener.receive_from_all().await
+        });
+
+        future_confirmation_receiver.await.unwrap();
+
+        let data = vec![
+            (
+                b"some other payload".as_slice().to_vec(),
+                random_socket_addr(),
+            ),
+            (b"Hello world".as_slice().to_vec(), random_socket_addr()),
+        ];
+
+        for ele in &data {
+            event_bus
+                .send(RLPGEvent::NewPacketReceived(ele.clone()))
+                .unwrap();
+        }
+
+        let fut = tokio::join!(fut1).0.unwrap();
+        assert!(fut.ok().unwrap().0 == data[0].0);
+    }
+}
