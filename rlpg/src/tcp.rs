@@ -461,6 +461,8 @@ async fn react_to_new_event_on_event_bus(
                             )),
                         )
                         .await;
+
+                        return AfterReactingToEvent::EndFunction;
                     }
 
                     AfterReactingToEvent::GoToNextIteration
