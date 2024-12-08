@@ -383,85 +383,92 @@ async fn react_to_new_event_on_event_bus(
     event: &Event,
 ) -> AfterReactingToEvent {
     match event {
-        Event::CodeToSocket(code_to_socket_ev) => match code_to_socket_ev {
-            CodeToSocketEvent::DisconnectTheClient {
-                id,
-                socket_addr: event_target_socket_addr,
-            } => {
-                if *event_target_socket_addr != *socket_addr {
-                    return AfterReactingToEvent::DoNothing;
-                }
+        Event::CodeToSocket(code_to_socket_ev) => {
+            match code_to_socket_ev {
+                CodeToSocketEvent::DisconnectTheClient {
+                    id,
+                    socket_addr: event_target_socket_addr,
+                } => {
+                    if *event_target_socket_addr != *socket_addr {
+                        return AfterReactingToEvent::DoNothing;
+                    }
 
-                // result is purposefully ignored; even if the socket is shut down incorrectly, the
-                // client will be disconnected anyway
-                let _ = socket.shutdown().await;
-
-                if let Err(e) = socket_event_bus.send(Event::SocketToCode(
-                    SocketToCodeEvent::ClientDisconnected {
-                        id: Some(*id),
-                        socket_addr: *socket_addr,
-                    },
-                )) {
-                    tracing::debug!(
-                        "[RLPG] Error occured while trying to send ClientDisconnected event, normally this would be a warn, but we are disconnecting the client anyway. ({e})"
-                    );
-                }
-
-                AfterReactingToEvent::EndFunction
-            }
-
-            CodeToSocketEvent::SendNewPacketToClient {
-                id,
-                data,
-                client_addr: event_target_socket_addr,
-            } => {
-                if *event_target_socket_addr != *socket_addr {
-                    return AfterReactingToEvent::DoNothing;
-                }
-
-                let content_length = data.len();
-                let header = format!("RLPG/{VERSION}\n{content_length}\n\n");
-                if let Err(err) = socket.write_all(&header.as_bytes()).await {
-                    tracing::warn!(
-                        "[RLPG] Failed to write to socket {socket_addr}, closing. ({err})"
-                    );
-
+                    // result is purposefully ignored; even if the socket is shut down incorrectly, the
+                    // client will be disconnected anyway
                     let _ = socket.shutdown().await;
 
-                    if let Err(err) = socket_event_bus.send(Event::SocketToCode(
+                    if let Err(e) = socket_event_bus.send(Event::SocketToCode(
                         SocketToCodeEvent::ClientDisconnected {
-                            id: None,
+                            id: Some(*id),
                             socket_addr: *socket_addr,
                         },
                     )) {
-                        tracing::warn!("[RLPG] Error occured while trying to send event through event bus: {err}");
+                        tracing::debug!(
+                        "[RLPG] Error occured while trying to send ClientDisconnected event, normally this would be a warn, but we are disconnecting the client anyway. ({e})"
+                    );
                     }
 
-                    return AfterReactingToEvent::EndFunction;
+                    AfterReactingToEvent::EndFunction
                 }
 
-                if let Err(e) = socket.write_all(data).await {
-                    let _ = socket.shutdown().await;
-                    let _ = socket_event_bus.send(Event::SocketToCode(
-                        SocketToCodeEvent::ClientDisconnected {
-                            id: None,
-                            socket_addr: *socket_addr,
-                        },
-                    ));
+                CodeToSocketEvent::SendNewPacketToClient {
+                    id,
+                    data,
+                    client_addr: event_target_socket_addr,
+                } => {
+                    if *event_target_socket_addr != *socket_addr {
+                        return AfterReactingToEvent::DoNothing;
+                    }
 
-                    return AfterReactingToEvent::EndFunction;
+                    let content_length = data.len();
+                    let header = format!("RLPG/{VERSION}\n{content_length}\n\n");
+                    if let Err(err) = socket.write_all(&header.as_bytes()).await {
+                        tracing::warn!(
+                            "[RLPG] Failed to write to socket {socket_addr}, closing. ({err})"
+                        );
+
+                        shutdown_socket_with_optional_warn(
+                            socket,
+                            socket_addr,
+                            socket_event_bus,
+                            Some(format!("[RLPG] Error occured while trying to send event through event bus: {err}"))
+                        ).await;
+
+                        return AfterReactingToEvent::EndFunction;
+                    }
+
+                    if let Err(e) = socket.write_all(data).await {
+                        shutdown_socket_with_optional_warn(
+                            socket,
+                            socket_addr,
+                            socket_event_bus,
+                            Some(format!("[RLPG] Error occured while trying to write data to the socket, disconnecting the client {socket_addr}. ({e})")),
+                        )
+                        .await;
+
+                        return AfterReactingToEvent::EndFunction;
+                    }
+
+                    if let Err(e) = socket_event_bus.send(Event::SocketToCode(
+                        SocketToCodeEvent::NewPacketSent { id: *id },
+                    )) {
+                        shutdown_socket_with_optional_warn(
+                            socket,
+                            socket_addr,
+                            socket_event_bus,
+                            Some(format!(
+                                "[RLPG] failed to send NewPacketSent event on event bus: {e}"
+                            )),
+                        )
+                        .await;
+                    }
+
+                    AfterReactingToEvent::GoToNextIteration
                 }
 
-                socket_event_bus.send(Event::SocketToCode(SocketToCodeEvent::ClientDisconnected {
-                    id: Some(*id),
-                    socket_addr: *event_target_socket_addr,
-                }));
-
-                AfterReactingToEvent::GoToNextIteration
+                _ => AfterReactingToEvent::DoNothing,
             }
-
-            _ => AfterReactingToEvent::DoNothing,
-        },
+        }
         _ => AfterReactingToEvent::DoNothing,
     }
 }
