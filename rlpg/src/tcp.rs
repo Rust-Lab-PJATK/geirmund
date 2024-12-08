@@ -369,6 +369,87 @@ impl RLPGEventBus {
     }
 }
 
+async fn run_on_socket(
+    mut socket: TcpStream,
+    cancellation_token: CancellationToken,
+    mut socket_event_bus: RLPGEventBus,
+) -> impl Future<Output = Result<(), RunOnSocketError>> {
+    async move {
+        let socket_addr = socket.peer_addr()?; // TODO: handle this error and send disconnect
+        let mut parser = RLPGParser::new();
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                res = socket.read_u8() => {
+                    match res {
+                        Ok(character) => parser.add_char_to_buffer(character),
+                        Err(e) => return Err(shutdown_socket_on_io_error(&mut socket, &socket_addr, &mut socket_event_bus, e).await),
+                    };
+                },
+                ev = socket_event_bus.receive() => {
+                    match react_to_new_event_on_event_bus(&mut socket, &mut socket_event_bus, &socket_addr, &ev).await {
+                        AfterReactingToEvent::GoToNextIteration => continue,
+                        AfterReactingToEvent::EndFunction => return Ok(()),
+                        AfterReactingToEvent::DoNothing => {},
+                    };
+                }
+            };
+
+            match parser.parse() {
+                Ok(Some(parsed_data)) => {
+                    if let Err(e) = socket_event_bus.send(Event::SocketToCode(
+                        SocketToCodeEvent::NewPacketReceived {
+                            data: parsed_data,
+                            socket_addr: socket_addr.clone(),
+                        },
+                    )) {
+                        shutdown_socket_with_optional_warn(&mut socket, &socket_addr, &mut socket_event_bus, format!("[RLPG] Error occured while trying to send NewPacketReceived event: {e}").into()).await;
+                        return Ok(());
+                    }
+
+                    parser = RLPGParser::new();
+                }
+                Err(e) => {
+                    shutdown_socket_with_optional_warn(
+                        &mut socket,
+                        &socket_addr,
+                        &mut socket_event_bus,
+                        format!(
+                            "Client sent invalid byte, disconnecting him: {socket_addr}. ({e})"
+                        )
+                        .into(),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                _ => {}
+            };
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug, Clone)]
+enum RunOnSocketError {
+    #[error("IO error: {0}")]
+    IOError(String),
+
+    #[error("Failed to send event through event bus: {0}")]
+    SendError(String),
+}
+
+impl From<TokioSendError<Event>> for RunOnSocketError {
+    fn from(value: TokioSendError<Event>) -> Self {
+        return RunOnSocketError::SendError(value.to_string());
+    }
+}
+
+impl From<tokio::io::Error> for RunOnSocketError {
+    fn from(value: tokio::io::Error) -> Self {
+        return RunOnSocketError::IOError(value.to_string());
+    }
+}
+
 enum AfterReactingToEvent {
     GoToNextIteration,
     EndFunction,
@@ -499,87 +580,6 @@ async fn shutdown_socket_on_io_error(
 ) -> RunOnSocketError {
     shutdown_socket_with_optional_warn(socket, socket_addr, socket_event_bus, None).await;
     return RunOnSocketError::IOError(error.to_string());
-}
-
-async fn run_on_socket(
-    mut socket: TcpStream,
-    cancellation_token: CancellationToken,
-    mut socket_event_bus: RLPGEventBus,
-) -> impl Future<Output = Result<(), RunOnSocketError>> {
-    async move {
-        let socket_addr = socket.peer_addr()?; // TODO: handle this error and send disconnect
-        let mut parser = RLPGParser::new();
-
-        loop {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
-                res = socket.read_u8() => {
-                    match res {
-                        Ok(character) => parser.add_char_to_buffer(character),
-                        Err(e) => return Err(shutdown_socket_on_io_error(&mut socket, &socket_addr, &mut socket_event_bus, e).await),
-                    };
-                },
-                ev = socket_event_bus.receive() => {
-                    match react_to_new_event_on_event_bus(&mut socket, &mut socket_event_bus, &socket_addr, &ev).await {
-                        AfterReactingToEvent::GoToNextIteration => continue,
-                        AfterReactingToEvent::EndFunction => return Ok(()),
-                        AfterReactingToEvent::DoNothing => {},
-                    };
-                }
-            };
-
-            match parser.parse() {
-                Ok(Some(parsed_data)) => {
-                    if let Err(e) = socket_event_bus.send(Event::SocketToCode(
-                        SocketToCodeEvent::NewPacketReceived {
-                            data: parsed_data,
-                            socket_addr: socket_addr.clone(),
-                        },
-                    )) {
-                        shutdown_socket_with_optional_warn(&mut socket, &socket_addr, &mut socket_event_bus, format!("[RLPG] Error occured while trying to send NewPacketReceived event: {e}").into()).await;
-                        return Ok(());
-                    }
-
-                    parser = RLPGParser::new();
-                }
-                Err(e) => {
-                    shutdown_socket_with_optional_warn(
-                        &mut socket,
-                        &socket_addr,
-                        &mut socket_event_bus,
-                        format!(
-                            "Client sent invalid byte, disconnecting him: {socket_addr}. ({e})"
-                        )
-                        .into(),
-                    )
-                    .await;
-                    return Ok(());
-                }
-                _ => {}
-            };
-        }
-    }
-}
-
-#[derive(thiserror::Error, Debug, Clone)]
-enum RunOnSocketError {
-    #[error("IO error: {0}")]
-    IOError(String),
-
-    #[error("Failed to send event through event bus: {0}")]
-    SendError(String),
-}
-
-impl From<TokioSendError<Event>> for RunOnSocketError {
-    fn from(value: TokioSendError<Event>) -> Self {
-        return RunOnSocketError::SendError(value.to_string());
-    }
-}
-
-impl From<tokio::io::Error> for RunOnSocketError {
-    fn from(value: tokio::io::Error) -> Self {
-        return RunOnSocketError::IOError(value.to_string());
-    }
 }
 
 //pub struct RLPGTcpListener {
