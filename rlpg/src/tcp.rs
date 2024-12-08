@@ -396,7 +396,18 @@ async fn react_to_new_event_on_event_bus(
                 // client will be disconnected anyway
                 let _ = socket.shutdown().await;
 
-                AfterReactingToEvent::GoToNextIteration
+                if let Err(e) = socket_event_bus.send(Event::SocketToCode(
+                    SocketToCodeEvent::ClientDisconnected {
+                        id: Some(*id),
+                        socket_addr: *socket_addr,
+                    },
+                )) {
+                    tracing::debug!(
+                        "[RLPG] Error occured while trying to send ClientDisconnected event, normally this would be a warn, but we are disconnecting the client anyway. ({e})"
+                    );
+                }
+
+                AfterReactingToEvent::EndFunction
             }
 
             CodeToSocketEvent::SendNewPacketToClient {
