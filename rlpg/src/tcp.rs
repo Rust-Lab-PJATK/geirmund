@@ -455,17 +455,29 @@ async fn react_to_new_event_on_event_bus(
     }
 }
 
+async fn shutdown_socket_with_optional_warn(
+    socket: &mut TcpStream,
+    socket_addr: &SocketAddr,
+    socket_event_bus: &mut RLPGEventBus,
+    message: Option<String>,
+) {
+    let _ = socket.shutdown().await;
+    let _ = socket_event_bus.send(Event::SocketToCode(SocketToCodeEvent::ClientDisconnected {
+        id: None,
+        socket_addr: *socket_addr,
+    }));
+    if let Some(message) = message {
+        tracing::warn!(message);
+    }
+}
+
 async fn shutdown_socket_on_io_error(
     socket: &mut TcpStream,
     socket_addr: &SocketAddr,
     socket_event_bus: &mut RLPGEventBus,
     error: tokio::io::Error,
 ) -> RunOnSocketError {
-    let _ = socket.shutdown().await;
-    socket_event_bus.send(Event::SocketToCode(SocketToCodeEvent::ClientDisconnected {
-        id: None,
-        socket_addr: *socket_addr,
-    }));
+    shutdown_socket_with_optional_warn(socket, socket_addr, socket_event_bus, None).await;
     return RunOnSocketError::IOError(error.to_string());
 }
 
@@ -498,23 +510,29 @@ async fn run_on_socket(
 
             match parser.parse() {
                 Ok(Some(parsed_data)) => {
-                    socket_event_bus.send(Event::SocketToCode(
+                    if let Err(e) = socket_event_bus.send(Event::SocketToCode(
                         SocketToCodeEvent::NewPacketReceived {
                             data: parsed_data,
                             socket_addr: socket_addr.clone(),
                         },
-                    ));
+                    )) {
+                        shutdown_socket_with_optional_warn(&mut socket, &socket_addr, &mut socket_event_bus, format!("[RLPG] Error occured while trying to send NewPacketReceived event: {e}").into()).await;
+                        return Ok(());
+                    }
 
                     parser = RLPGParser::new();
                 }
                 Err(e) => {
-                    let _ = socket.shutdown().await;
-                    socket_event_bus.send(Event::SocketToCode(
-                        SocketToCodeEvent::ClientDisconnected {
-                            id: None,
-                            socket_addr: socket_addr.clone(),
-                        },
-                    ));
+                    shutdown_socket_with_optional_warn(
+                        &mut socket,
+                        &socket_addr,
+                        &mut socket_event_bus,
+                        format!(
+                            "Client sent invalid byte, disconnecting him: {socket_addr}. ({e})"
+                        )
+                        .into(),
+                    )
+                    .await;
                     return Ok(());
                 }
                 _ => {}
