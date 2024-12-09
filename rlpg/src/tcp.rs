@@ -1,3 +1,25 @@
+//! # Usage example
+//! You run the listener by using [`TcpListenerGateway::run`]. It will start TCP listener on
+//! address specified in argument using tokio::spawn under the hood. Returned value is a
+//! [`TcpListenerGateway`] that is interconnected with running TCP listener.
+//!
+//! ```rust
+//! let cancellation_token = CancellationToken::new();
+//!
+//! let tcp_listener_gateway = TcpListenerGateway::run("0.0.0.0:8080",
+//! cancellation_token.clone()).await;
+//!
+//! let tcp_client_gateway = TcpClientGateway::run("0.0.0.0:8080",
+//! cancellation_token.clone()).await;
+//!
+//! let connected_socket_addr = tcp_listener_gateway.listen_for_new_connection().await;
+//!
+//! tcp_listener_gateway.send_to_client(connected_socket_addr, b"Hello world!".to_vec()).await;
+//!
+//! cancellation_token.cancel();
+//! ```
+
+#[warn(missing_docs)]
 use error::tcp_listener::SendToClientError;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -9,7 +31,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{RLPGParser, VERSION};
 
+/// Errors that are used by this module
 pub mod error {
+    /// Errors for tcp listener
     pub mod tcp_listener {
         use crate::tcp::Event;
         use tokio::sync::broadcast::error::SendError;
@@ -52,12 +76,24 @@ pub mod error {
         }
     }
 
+    /// Errors for tcp client
     pub mod tcp_client {
-        pub enum SendError {}
+        pub use super::tcp_listener::SendToClientError as SendError;
+        use thiserror::Error;
 
         pub enum ReceiveError {}
 
-        pub enum RunError {}
+        #[derive(Error, Clone, Debug)]
+        pub enum RunError {
+            #[error("io error occured: {0}")]
+            IOError(String),
+        }
+
+        impl From<tokio::io::Error> for RunError {
+            fn from(value: tokio::io::Error) -> Self {
+                Self::IOError(value.to_string())
+            }
+        }
 
         pub enum WaitForConnectError {}
 
@@ -65,6 +101,7 @@ pub mod error {
     }
 }
 
+/// Tcp listener implementation that uses RLPG protocol.
 #[derive(Debug, Clone)]
 pub struct TcpListenerGateway {
     event_bus: RLPGEventBus,
@@ -91,7 +128,7 @@ impl TcpListenerGateway {
                             continue
                         }
                     },
-                    _ = cancellation_token.cancelled() => return,
+                        _ = cancellation_token.cancelled() => return,
                 };
 
                 let cancellation_token = cancellation_token.clone();
@@ -112,10 +149,14 @@ impl TcpListenerGateway {
         return Ok(me);
     }
 
+    // TODO: test case for disconnected client before the function started
+    // TODO: test case for client that disconnects after function start
+    // TODO: normal test case
     pub async fn receive_from_client(
         &mut self,
         socket_addr: &SocketAddr,
     ) -> Result<Vec<u8>, error::tcp_listener::ReceiveFromClientError> {
+        // TODO: Check if client is connected
         loop {
             match self.event_bus.receive().await {
                 Event::SocketToCode(SocketToCodeEvent::NewPacketReceived {
@@ -146,6 +187,7 @@ impl TcpListenerGateway {
         }
     }
 
+    // TODO: test case for disconnected client
     // TODO: test case for timeout with big payload size
     // TODO: test case for timeout
     // TODO: test case for sending itself
@@ -154,61 +196,13 @@ impl TcpListenerGateway {
         client_addr: SocketAddr,
         payload: Vec<u8>,
     ) -> Result<(), error::tcp_listener::SendToClientError> {
-        let minimum_payload_sending_speed = 100; // kilobits/sec
-        let bits = payload.len() * 8;
-
-        let timeout_after = minimum_payload_sending_speed * bits; // seconds
-
-        let request_id: u32 = rand::random();
-
-        self.event_bus.send(Event::CodeToSocket(
-            CodeToSocketEvent::SendNewPacketToClient {
-                id: request_id,
-                data: payload,
-                client_addr,
-            },
-        ))?;
-
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_after as u64)) => {
-                return Err(error::tcp_listener::SendToClientError::TimedOut);
-            },
-            res = self.wait_for_packet_sent_confirmation(request_id) => res?
-        };
-
-        Ok(())
-    }
-
-    async fn wait_for_packet_sent_confirmation(
-        &mut self,
-        request_id: u32,
-    ) -> Result<(), SendToClientError> {
-        loop {
-            match self.event_bus.receive().await {
-                Event::SocketToCode(SocketToCodeEvent::NewPacketSent {
-                    id: incoming_request_id,
-                }) => {
-                    if incoming_request_id != request_id {
-                        continue;
-                    }
-
-                    return Ok(());
-                }
-
-                Event::SocketToCode(SocketToCodeEvent::FailedToSendPacket {
-                    id: incoming_request_id,
-                    err,
-                }) => {
-                    if incoming_request_id != request_id {
-                        continue;
-                    }
-
-                    return Err(SendToClientError::SocketError(err.to_string()));
-                }
-
-                _ => {}
-            };
-        }
+        // TODO: Check if client is connected
+        return send_new_packet_to_client_event_with_timeout(
+            &mut self.event_bus,
+            payload,
+            &client_addr,
+        )
+        .await;
     }
 
     //pub async fn send_to_all(
@@ -247,37 +241,148 @@ impl TcpListenerGateway {
     }
 }
 
+/// Tcp client implementation that uses RLPG protocol.
+///
+/// To connect use [`TcpClientGateway::run`]. The function will return an
+/// [`error::tcp_client::RunError::IOError`] if it can't connect to the server
+/// **(warn: IO Error can be used for other things as well)**.
+///
+/// If TcpStream connects successfully, the connection will be converted to a background task using
+/// [`tokio::spawn`] under the hood and you will receive an instance of [`TcpClientGateway`] which
+/// can be used to control your connection.
+///
+/// ```rust
+/// let client = TcpClientGateway::run("0.0.0.0:8080").await.unwrap();
+///
+/// client.send(b"Hello world!").await.unwrap();
+/// let data = client.receive().await.unwrap();
+/// println!("{data:?}");
+///
+/// client.wait_for_disconnect().await.unwrap();
+/// ```
 #[derive(Debug, Clone)]
-pub struct TcpClient {}
+pub struct TcpClientGateway {
+    socket_addr: SocketAddr,
+    event_bus: RLPGEventBus,
+}
 
-impl TcpClient {
-    pub fn new() -> Self {
-        Self {}
-    }
-
+impl TcpClientGateway {
     pub async fn wait_for_disconnect(
-        &self,
+        &mut self,
     ) -> Result<(), error::tcp_client::WaitForDisconnectError> {
-        Ok(())
+        // TODO: Check if client is connected
+        loop {
+            match self.event_bus.receive().await {
+                Event::SocketToCode(SocketToCodeEvent::ClientDisconnected { id, socket_addr }) => {
+                    return Ok(())
+                }
+                _ => continue,
+            }
+        }
     }
 
-    pub async fn wait_for_connect(&self) -> Result<(), error::tcp_client::WaitForConnectError> {
-        Ok(())
+    /// Send data to the server.
+    pub async fn send(&mut self, payload: Vec<u8>) -> Result<(), error::tcp_client::SendError> {
+        // TODO: Check if client is connected
+        return send_new_packet_to_client_event_with_timeout(
+            &mut self.event_bus,
+            payload,
+            &self.socket_addr,
+        )
+        .await;
     }
 
-    pub async fn send(&self, payload: Vec<u8>) -> Result<(), error::tcp_client::SendError> {
-        Ok(())
+    /// Receive data from the server
+    pub async fn receive(&mut self) -> Result<Vec<u8>, error::tcp_client::ReceiveError> {
+        // TODO: Check if client is connected
+
+        loop {
+            match self.event_bus.receive().await {
+                Event::SocketToCode(SocketToCodeEvent::NewPacketReceived { data, socket_addr }) => {
+                    return Ok(data);
+                }
+
+                _ => {}
+            };
+        }
     }
 
-    pub async fn receive(&self) -> Result<Vec<u8>, error::tcp_client::ReceiveError> {
-        Ok(Vec::new())
-    }
-
-    pub fn run(
-        &self,
+    pub async fn run(
+        addr: &str,
         cancellation_token: CancellationToken,
-    ) -> impl Future<Output = Result<(), error::tcp_client::RunError>> {
-        async move { Ok(()) }
+    ) -> Result<Self, error::tcp_client::RunError> {
+        let tcp_stream = tokio::net::TcpStream::connect(addr).await?;
+        let me = Self {
+            event_bus: RLPGEventBus::new(),
+            socket_addr: tcp_stream.peer_addr()?,
+        };
+        let event_bus = me.event_bus.clone();
+
+        tokio::spawn(async move { run_on_socket(tcp_stream, cancellation_token, event_bus).await });
+
+        Ok(me)
+    }
+}
+
+async fn send_new_packet_to_client_event_with_timeout(
+    event_bus: &mut RLPGEventBus,
+    payload: Vec<u8>,
+    client_addr: &SocketAddr,
+) -> Result<(), SendToClientError> {
+    let minimum_payload_sending_speed = 100; // kilobits/sec
+    let bits = payload.len() * 8;
+
+    let timeout_after = minimum_payload_sending_speed * bits; // seconds
+
+    let request_id: u32 = rand::random();
+
+    event_bus.send(Event::CodeToSocket(
+        CodeToSocketEvent::SendNewPacketToClient {
+            id: request_id,
+            data: payload,
+            client_addr: *client_addr,
+        },
+    ))?;
+
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_after as u64)) => {
+            return Err(error::tcp_listener::SendToClientError::TimedOut);
+        },
+        res = wait_for_packet_sent_confirmation_on_event_bus(event_bus, request_id) => res?
+    };
+
+    Ok(())
+}
+
+async fn wait_for_packet_sent_confirmation_on_event_bus(
+    event_bus: &mut RLPGEventBus,
+    request_id: u32,
+) -> Result<(), SendToClientError> {
+    loop {
+        match event_bus.receive().await {
+            Event::SocketToCode(SocketToCodeEvent::NewPacketSent {
+                id: incoming_request_id,
+            }) => {
+                if incoming_request_id != request_id {
+                    continue;
+                }
+
+                return Ok(());
+            }
+
+            Event::SocketToCode(SocketToCodeEvent::FailedToSendPacket {
+                id: incoming_request_id,
+                err,
+            }) => {
+                if incoming_request_id != request_id {
+                    continue;
+                }
+
+                return Err(SendToClientError::SocketError(err.to_string()));
+            }
+
+            _ => {}
+        };
     }
 }
 
@@ -381,7 +486,7 @@ async fn run_on_socket(
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
-                res = socket.read_u8() => {
+                    res = socket.read_u8() => {
                     match res {
                         Ok(character) => parser.add_char_to_buffer(character),
                         Err(e) => return Err(shutdown_socket_on_io_error(&mut socket, &socket_addr, &mut socket_event_bus, e).await),
