@@ -1,4 +1,5 @@
-use crate::inference::{TextModelConfig, TextModelFiles};
+use std::sync::OnceLock;
+use crate::inference::{Device, Model, TextModelConfig, TextModelFiles};
 use anyhow::Error as E;
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
@@ -7,38 +8,17 @@ use candle_transformers::models::llama::{
 };
 use derive_more::Debug as DMDebug;
 use std::time::Instant;
+use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+use ort::session::builder::GraphOptimizationLevel;
 use tokenizers::Tokenizer;
 
 #[derive(DMDebug)]
 pub struct LlamaInternals {
-    pub inner_config: CandleConfig,
-    pub inner_model: CandleLlama,
-    pub cache: Cache,
+    pub model: Model,
     pub tokenizer: Tokenizer,
-    #[debug(skip)]
-    pub logits_processor: LogitsProcessor,
 }
 
 impl LlamaInternals {
-    fn load_inner_config(filename: &str) -> anyhow::Result<CandleConfig> {
-        let config = std::fs::read_to_string(filename)?;
-        let config: LlamaConfig = serde_json::from_str(&config)?;
-        Ok(config.into_config(false))
-    }
-
-    fn make_logits_processor(text_model_config: &TextModelConfig) -> LogitsProcessor {
-        let sampling = if text_model_config.temperature <= 0. {
-            Sampling::ArgMax
-        } else {
-            Sampling::TopKThenTopP {
-                k: text_model_config.top_k,
-                p: text_model_config.top_p,
-                temperature: text_model_config.temperature,
-            }
-        };
-        LogitsProcessor::from_sampling(1337, sampling)
-    }
-
     #[tracing::instrument(skip_all)]
     pub fn new(
         text_model_config: &TextModelConfig,
@@ -46,34 +26,28 @@ impl LlamaInternals {
     ) -> anyhow::Result<LlamaInternals> {
         tracing::debug!("Loading Llama...");
         let start_time = Instant::now();
-
-        let inner_config = Self::load_inner_config(&text_model_files.inner_config_filename)?;
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &text_model_files.weight_filenames,
-                text_model_config.data_type,
-                &text_model_config.device,
-            )?
+        
+        let execution_provider = match text_model_config.device {
+            Device::CPU => CPUExecutionProvider::default().build(),
+            Device::CUDA(id) => CUDAExecutionProvider::default().with_device_id(id as i32).build(),
         };
-        let inner_model = CandleLlama::load(vb, &inner_config)?;
-        let cache = Cache::new(
-            false,
-            text_model_config.data_type,
-            &inner_config,
-            &text_model_config.device,
-        )?;
-        let tokenizer =
-            Tokenizer::from_file(&text_model_files.tokenizer_filename).map_err(E::msg)?;
-        let logits_processor = Self::make_logits_processor(text_model_config);
+        ort::init()
+            .with_name("GPT-2")
+            .with_execution_providers([execution_provider])
+            .commit()?;
+
+        let model = Model::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level1)?
+            .with_intra_threads(1)?
+            .commit_from_file(&text_model_files.weight_filenames.first().unwrap())?;
+        
+        let tokenizer = Tokenizer::from_file(&text_model_files.tokenizer_filename)
+            .map_err(E::msg)?;
 
         tracing::debug!("Loaded in {}ms", start_time.elapsed().as_millis());
-
         Ok(LlamaInternals {
-            inner_config,
-            inner_model,
-            cache,
+            model,
             tokenizer,
-            logits_processor,
         })
     }
 }

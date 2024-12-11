@@ -40,7 +40,7 @@ pub struct Args {
         value_parser,
         num_args = 1..,
         value_delimiter = ' ',
-        default_value = "llama3v2-1b/model.safetensors",
+        default_value = "gpt2/gpt2.onnx",
         help = "Paths for weight files (might be multiple)"
     )]
     pub weights: Vec<String>,

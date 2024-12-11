@@ -1,8 +1,11 @@
-use candle_core::{DType, Device};
+use candle_core::{DType};
 use std::sync::Arc;
+use ort::session::Session;
 
 pub mod guard;
 pub mod llama;
+
+pub type Model = Session;
 
 pub trait TextModel
 where
@@ -32,6 +35,12 @@ pub struct TextModelConfig {
     pub top_k: usize,
     pub repeat_penalty: f32,
     pub repeat_last_n: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum Device {
+    CPU,
+    CUDA(usize)
 }
 
 #[derive(Debug)]
@@ -102,7 +111,7 @@ impl Default for TextModelConfigBuilder {
     fn default() -> Self {
         Self {
             text_model_config: TextModelConfig {
-                device: Device::Cpu,
+                device: Device::CPU,
                 data_type: DType::F16,
                 max_tokens: 512,
                 temperature: 0.8,

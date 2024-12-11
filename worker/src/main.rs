@@ -1,6 +1,4 @@
 use anyhow::Result;
-use candle_core::backend::BackendDevice;
-use candle_core::{CudaDevice, Device};
 use clap::Parser;
 use proto::master::Packet as MasterPacket;
 use proto::worker::Packet as WorkerPacket;
@@ -13,7 +11,7 @@ use tracing::Level;
 use worker::cli::Args;
 use worker::handler::{handle_packet, handle_read, handle_write};
 use worker::inference::guard::TextModelGuard;
-use worker::inference::{TextModelConfig, TextModelFiles};
+use worker::inference::{Device, TextModelConfig, TextModelFiles};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,9 +22,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let device = if let Some(cuda_device) = args.cuda_device {
-        Device::Cuda(CudaDevice::new(cuda_device)?)
+        Device::CUDA(cuda_device)
     } else {
-        Device::Cpu
+        Device::CPU
     };
 
     let config = Arc::new(

@@ -8,6 +8,8 @@ use candle_transformers::models::llama::LlamaEosToks;
 use derive_more::Debug as DMDebug;
 use std::sync::Arc;
 use std::time::Instant;
+use ort::inputs;
+use rand::Rng;
 
 #[derive(DMDebug)]
 pub struct LLama {
@@ -34,64 +36,40 @@ impl TextModel for LLama {
         let stared_at = Instant::now();
         tracing::debug!("Generating...");
 
-        let mut tokens = self
-            .llama_internals
-            .tokenizer
-            .encode(prompt, true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
+        let mut rng = rand::thread_rng();
 
-        let mut idx_pos = 0;
-        for idx in 0..self.text_model_config.max_tokens {
-            let (context_size, context_index) =
-                if self.llama_internals.cache.use_kv_cache && idx > 0 {
-                    (1, idx_pos)
-                } else {
-                    (tokens.len(), 0)
-                };
+        let tokens = self.llama_internals.tokenizer.encode(prompt, false)
+            .map_err(E::msg)?;
+        let mut tokens = Arc::new(
+            tokens.get_ids().iter()
+                .map(|i| *i as i64)
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        );
 
-            let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.text_model_config.device)?.unsqueeze(0)?;
-            let logits = self
-                .llama_internals
-                .inner_model
-                .forward(&input, context_index, &mut self.llama_internals.cache)?
-                .squeeze(0)?;
-            let logits = if self.text_model_config.repeat_penalty == 1. {
-                logits
-            } else {
-                let start_at = tokens
-                    .len()
-                    .saturating_sub(self.text_model_config.repeat_last_n);
-                candle_transformers::utils::apply_repeat_penalty(
-                    &logits,
-                    self.text_model_config.repeat_penalty,
-                    &tokens[start_at..],
-                )?
-            };
-            idx_pos += ctxt.len();
+        for _ in 0..self.text_model_config.max_tokens {
+            let input = (vec![1, 1, tokens.len() as i64], Arc::clone(&tokens));
+            let outputs = self.llama_internals.model.run(inputs![input]?)?;
+            let (dim, mut probabilities) = outputs["output1"].try_extract_raw_tensor()?;
 
-            let next_token = self.llama_internals.logits_processor.sample(&logits)?;
-            tokens.push(next_token);
+            let (seq_len, vocab_size) = (dim[2] as usize, dim[3] as usize);
+            probabilities = &probabilities[(seq_len - 1) * vocab_size..];
 
-            match self.llama_internals.inner_config.eos_token_id {
-                Some(LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
-                    break;
-                }
-                Some(LlamaEosToks::Multiple(ref eos_ids)) if eos_ids.contains(&next_token) => {
-                    break;
-                }
-                _ => (),
-            }
+            let mut probabilities: Vec<(usize, f32)> = probabilities.iter().copied().enumerate().collect();
+            probabilities.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Less));
+
+            let token = probabilities[rng.gen_range(0..=self.text_model_config.top_k)].0 as i64;
+
+            let mut vec = tokens.to_vec();
+            vec.push(token);
+            *Arc::make_mut(&mut tokens) = vec.into_boxed_slice();
         }
-
-        tracing::debug!("Generated in {}ms", stared_at.elapsed().as_millis());
-        Ok(self
-            .llama_internals
-            .tokenizer
-            .decode(tokens.as_slice(), true)
-            .map_err(E::msg)?)
+    
+        Ok(
+            self.llama_internals.tokenizer.decode(
+                &*tokens.iter().map(|i| *i as u32).collect::<Vec<_>>(), false
+            ).map_err(E::msg)?,
+        )
     }
 
     fn config(&self) -> &TextModelConfig {
@@ -100,5 +78,19 @@ impl TextModel for LLama {
 
     fn filenames(&self) -> &TextModelFiles {
         &self.text_model_files
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+    use crate::inference::llama::LLama;
+    use crate::inference::{TextModel, TextModelConfig, TextModelFiles};
+
+    #[test]
+    fn run_gpt2() {
+        let tmc = TextModelConfig::default_builder().build();
+        let fmc = TextModelFiles::new("llama3v2-1b/config.json".to_string(), "llama3v2-1b/tokenizer.json".to_string(), vec!["llama3v2-1b/model.safetensors".to_string()]);
+        let model = LLama::new(Arc::new(tmc), Arc::new(fmc)).unwrap();
     }
 }
