@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package com.github.rustlabpjatk.geirmund;
+
+service Master {
+  rpc Stream(stream WorkerPacket) returns (stream MasterPacket) {}
+}
+
+message MasterPacket {
+  oneof msg {
+    LoadCommand load_command = 1;
+    GenerateCommand generate_command = 2;
+  }
+}
+
+message LoadCommand {
+  uint32 id = 1;
+  ModelType type = 2;
+}
+
+message GenerateCommand {
+  uint32 id = 1;
+  ModelType type = 2;
+  string prompt = 3;
+}
+
+enum ModelType {
+  LLAMA3V2_1B = 0;
+}
+
+message WorkerPacket {
+  oneof msg {
+    WorkerResult generate_response = 1;
+    WorkerResult load_response = 2;
+  }
+}
+
+message GenerateResponse {
+  uint32 id = 1;
+  string content = 2;
+}
+
+message LoadResponse {
+  uint32 id = 1;
+}
+
+message WorkerErrorWrapper {
+  oneof err {
+    WorkerErrorContent model_busy = 1;
+    WorkerErrorContent model_already_loaded = 2;
+    WorkerErrorContent model_not_loaded = 3;
+    WorkerErrorContent loading_error = 4;
+    WorkerErrorContent generation_error = 5;
+  }
+}
+
+message WorkerErrorContent {
+  uint32 id = 1;
+  string content = 2;
+}
+
+message WorkerResult {
+  oneof result {
+    GenerateResponse generate_response = 1;
+    LoadResponse load_response = 2;
+    WorkerErrorWrapper error = 3;
+  }
+}
