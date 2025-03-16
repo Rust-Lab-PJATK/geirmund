@@ -1,4 +1,8 @@
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=compiled");
+    println!("cargo:rerun-if-changed=src/main.rs");
+
     tonic_build::configure()
         .build_client(true)
         .build_server(true)
