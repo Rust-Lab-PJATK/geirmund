@@ -57,50 +57,26 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    // disable raw mode, because when it is enabled it disables ctrl+c handling
-    _ = crossterm::terminal::disable_raw_mode();
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .unwrap();
 
     let cancellation_token = CancellationToken::new();
 
-    let rlpg_event_bus = RLPGEventBus::new();
+    let (send_request_sender, send_request_receiver) = mpsc::channel(128);
+    let (receive_response_sender, receive_response_receiver) = mpsc::channel(128);
 
-    let mut tui = tui::Tui::new(rlpg_event_bus.clone());
-
-    let tui_fut = Box::pin(tui.run(cancellation_token.clone())).shared();
-    let server_fut = Box::pin(server::run(
-        String::from("127.0.0.1:4339"),
-        cancellation_token.clone(),
-        rlpg_event_bus,
-    ))
-    .shared();
-    let signal_fut = Box::pin(cancellation_token.run_until_cancelled(async {
-        _ = tokio::signal::ctrl_c().await;
-    }))
-    .shared();
-
-    tokio::select! {
-        _ = server_fut.clone() => {},
-        _ = signal_fut.clone() => {},
-        _ = tui_fut.clone() => {},
+    let server = MasterServer {
+        cancellation_token: cancellation_token.clone(),
+        send_request_receiver,
+        receive_response_sender,
     };
 
-    cancellation_token.cancel();
-
-    if let Err(e) = tui_fut.await {
-        if e != TuiError::Cancelled {
-            tracing::error!("{}", e);
-            eprintln!("Error occured within TUI: {e}");
-        }
-    }
-
-    if let Err(e) = server_fut.await {
-        tracing::error!("{}", e);
-        eprintln!("Error occured within tcp server: {e}");
-    }
-
-    tracing::info!("The tcp listener has been closed.");
-
-    _ = signal_fut.await;
-
-    tracing::info!("The ctrl+c signal listener has been closed.");
+    Server::builder()
+        .add_service(reflection_service)
+        .add_service(proto::master_server::MasterServer::new(server))
+        .serve("[::1]:50051".to_socket_addrs().unwrap().next().unwrap())
+        .await
+        .unwrap();
 }
