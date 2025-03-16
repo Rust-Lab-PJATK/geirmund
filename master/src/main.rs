@@ -1,12 +1,40 @@
-use futures::FutureExt;
-use rlpg::tcp::{RLPGEvent, RLPGEventBus};
-use server::WorkerGateway;
+use futures::Stream;
+use proto::{MasterPacket, WorkerPacket};
+use std::{net::ToSocketAddrs, pin::Pin};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
 use tracing::Level;
-use tui::TuiError;
 
-mod server;
-mod tui;
+pub struct MasterServer {
+    cancellation_token: CancellationToken,
+    send_request_receiver: mpsc::Receiver<MasterPacket>,
+    receive_response_sender: mpsc::Sender<WorkerPacket>,
+}
+
+#[tonic::async_trait]
+impl proto::master_server::Master for MasterServer {
+    // this name is awful, but it's required by tonic.
+    // I did not have any choice.
+    type StreamStream = Pin<Box<dyn Stream<Item = Result<MasterPacket, Status>> + Send>>;
+
+    async fn stream(
+        &self,
+        request: Request<Streaming<WorkerPacket>>,
+    ) -> Result<Response<Self::StreamStream>, Status> {
+        let in_stream = request.into_inner();
+
+        let (tx, rx) = mpsc::channel(128);
+
+        let cancellation_token = self.cancellation_token.clone();
+        tokio::spawn(async move { while !cancellation_token.is_cancelled() {} });
+
+        let out_stream = ReceiverStream::new(rx);
+
+        Ok(Response::new(Box::pin(out_stream) as Self::StreamStream))
+    }
+}
 
 #[tokio::main]
 async fn main() {
