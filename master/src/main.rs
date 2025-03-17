@@ -6,6 +6,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
 use tracing::Level;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct MasterServer {
     cancellation_token: CancellationToken,
@@ -90,26 +91,36 @@ impl proto::master_server::Master for MasterServer {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    std::env::set_var("RUST_LOG", "debug");
-
-    let subscriber = tracing_subscriber::fmt()
+fn setup_logging() {
+    let stdout_layer = tracing_subscriber::fmt::Layer::new()
         .compact()
         .with_level(true)
         .with_file(true)
         .with_line_number(true)
-        .with_max_level(Level::DEBUG) // TODO by env
+        .with_writer(std::io::stdout);
+
+    let file_layer = tracing_subscriber::fmt::Layer::new()
+        .compact()
+        .with_level(true)
+        .with_file(true)
+        .with_line_number(true)
         .with_writer(
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open("master.log")
                 .unwrap(),
-        )
-        .finish();
+        );
 
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    tracing_subscriber::registry()
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+}
+
+#[tokio::main]
+async fn main() {
+    setup_logging();
 
     tracing::info!("Creating reflection service...");
 
