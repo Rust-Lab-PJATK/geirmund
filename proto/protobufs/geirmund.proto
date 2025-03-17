@@ -32,7 +32,12 @@ message WorkerPacket {
   oneof msg {
     WorkerResult generate_response = 1;
     WorkerResult load_response = 2;
+    HelloCommand hello_command = 3;
   }
+}
+
+message HelloCommand {
+  string name = 1;
 }
 
 message GenerateResponse {

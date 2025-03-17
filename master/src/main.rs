@@ -136,17 +136,67 @@ async fn main() {
 
     let server = MasterServer {
         cancellation_token: cancellation_token.clone(),
-        send_response_tx,
+        send_response_tx: send_response_tx.clone(),
         send_response_rx,
         receive_request_tx,
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
-    Server::builder()
-        .add_service(reflection_service)
-        .add_service(proto::master_server::MasterServer::new(server))
-        .serve("[::1]:50051".to_socket_addrs().unwrap().next().unwrap())
+    let grpc_server_fut = tokio::spawn(async move {
+        Server::builder()
+            .add_service(reflection_service)
+            .add_service(proto::master_server::MasterServer::new(server))
+            .serve("[::1]:50051".to_socket_addrs().unwrap().next().unwrap())
+            .await
+    });
+
+    let respond_on_commands_cancellation_token = cancellation_token.clone();
+    let respond_on_commands_fut = tokio::spawn(async move {
+        respond_on_commands(
+            respond_on_commands_cancellation_token,
+            receive_request_rx,
+            send_response_tx,
+        )
         .await
-        .unwrap();
+    });
+
+    let (grpc_server_result, respond_on_commands_result) =
+        tokio::join!(grpc_server_fut, respond_on_commands_fut);
+
+    grpc_server_result.unwrap().unwrap();
+    respond_on_commands_result.unwrap();
+}
+
+async fn respond_on_commands(
+    cancellation_token: CancellationToken,
+    mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
+    send_response_tx: broadcast::Sender<MasterPacket>,
+) {
+    loop {
+        let request = tokio::select! {
+            received_req = receive_request_rx.recv() => match received_req {
+                Ok(received_req) => received_req,
+                Err(e) => {
+                    tracing::error!("Recoverable error received while listening for new requests: {e}");
+                    continue;
+                },
+            },
+            _ = cancellation_token.cancelled() => {break;}
+        };
+
+        match request {
+            (
+                socket_addr,
+                WorkerPacket {
+                    msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
+                },
+            ) => {
+                tracing::debug!(
+                    "hello command received on socket addr {socket_addr}: {hello_command:?}"
+                );
+            }
+            _ => unimplemented!(),
+        }
+    }
 }
