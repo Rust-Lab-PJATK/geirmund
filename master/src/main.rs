@@ -242,7 +242,7 @@ async fn respond_on_commands(
 mod tests {
     use std::time::Duration;
 
-    use proto::{master_client::MasterClient, WorkerPacket};
+    use proto::{master_client::MasterClient, HelloCommand, WorkerPacket};
     use tokio::{
         sync::{broadcast, mpsc},
         task::JoinHandle,
@@ -250,6 +250,7 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_util::sync::CancellationToken;
     use tonic::transport::Channel;
+    use proto::worker_packet::Msg as WorkerPacketMsg;
 
     use crate::{start_grpc_listener, start_respond_on_commands_worker, MasterServer};
 
@@ -306,29 +307,19 @@ mod tests {
             }
         }
 
-        pub async fn send_hello_command(self, name: impl Into<String>) -> Self {
-            let name = name.into();
-
+        pub async fn send_packet(self, packet: proto::WorkerPacket) -> Self {
             self.client_input_tx
-                .send(WorkerPacket {
-                    msg: Some(proto::worker_packet::Msg::HelloCommand(
-                        proto::HelloCommand {
-                            name: name.to_string(),
-                        },
-                    )),
-                })
+                .send(packet)
                 .await
                 .unwrap();
 
             self
         }
 
-        pub async fn assert_if_hello_command_has_been_received_on_master(
+        pub async fn assert_if_identical_packet_has_been_received_on_master(
             mut self,
-            name: impl Into<String>,
+            expected_packet: proto::WorkerPacket,
         ) -> Self {
-            let name = name.into();
-
             let event = tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     assert!(false, "Time exceeded.");
@@ -340,9 +331,9 @@ mod tests {
             assert!(
                 matches!(
                     &event,
-                    Ok((_, proto::WorkerPacket { msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand { name: received_name })) })) if *received_name == name
+                    Ok((_, packet)) if *packet == expected_packet 
                 ),
-                "Expected to receive HelloCommand, received {event:?} instead."
+                "Expected to receive identical HelloCommand {expected_packet:?}, received {event:?} instead."
             );
 
             self
@@ -360,11 +351,15 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_receives_hello_command() {
+        let packet = WorkerPacket {
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("helloworld") }))
+        };
+
         MasterTesting::new()
             .await
-            .send_hello_command("name")
+            .send_packet(packet.clone())
             .await
-            .assert_if_hello_command_has_been_received_on_master("name")
+            .assert_if_identical_packet_has_been_received_on_master(packet)
             .await
             .cancel()
             .await;
