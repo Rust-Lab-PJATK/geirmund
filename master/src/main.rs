@@ -149,7 +149,7 @@ async fn main() {
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
-    let grpc_server_fut = start_grpc_listener(server).await;
+    let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
     let respond_on_commands_cancellation_token = cancellation_token.clone();
     let respond_on_commands_fut = start_respond_on_commands_worker(
@@ -161,13 +161,14 @@ async fn main() {
     let (grpc_server_result, respond_on_commands_result) =
         tokio::join!(grpc_server_fut, respond_on_commands_fut);
 
-    grpc_server_result.unwrap().unwrap();
+    grpc_server_result.unwrap().unwrap().unwrap();
     respond_on_commands_result.unwrap();
 }
 
 async fn start_grpc_listener(
+    cancellation_token: CancellationToken,
     server: MasterServer,
-) -> JoinHandle<Result<(), tonic::transport::Error>> {
+) -> JoinHandle<Option<Result<(), tonic::transport::Error>>> {
     let reflection_service = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
         .build_v1()
@@ -176,12 +177,16 @@ async fn start_grpc_listener(
     let (ready_tx, ready_rx) = oneshot::channel();
 
     let fut = tokio::spawn(async move {
-        ready_tx.send(()).unwrap();
+        cancellation_token
+            .run_until_cancelled(async {
+                ready_tx.send(()).unwrap();
 
-        Server::builder()
-            .add_service(reflection_service)
-            .add_service(proto::master_server::MasterServer::new(server))
-            .serve("0.0.0.0:50051".to_socket_addrs().unwrap().next().unwrap())
+                Server::builder()
+                    .add_service(reflection_service)
+                    .add_service(proto::master_server::MasterServer::new(server))
+                    .serve("0.0.0.0:50051".to_socket_addrs().unwrap().next().unwrap())
+                    .await
+            })
             .await
     });
 
@@ -250,20 +255,21 @@ mod tests {
 
     struct MasterTesting {
         cancellation_token: CancellationToken,
-        grpc_fut: JoinHandle<Result<(), tonic::transport::Error>>,
+        grpc_fut: JoinHandle<Option<Result<(), tonic::transport::Error>>>,
         respond_to_commands_fut: JoinHandle<()>,
-        client: MasterClient<Channel>,
+        _client: MasterClient<Channel>,
         client_input_tx: mpsc::Sender<WorkerPacket>,
         receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     }
 
     impl MasterTesting {
-        pub async fn new(cancellation_token: CancellationToken) -> Self {
+        pub async fn new() -> Self {
+            let cancellation_token = CancellationToken::new();
             // set up listener
             let (send_response_tx, send_response_rx) = broadcast::channel(128);
             let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
 
-            let (client_input_tx, mut client_input_rx) = mpsc::channel::<WorkerPacket>(128);
+            let (client_input_tx, client_input_rx) = mpsc::channel::<WorkerPacket>(128);
 
             let server = MasterServer {
                 cancellation_token: cancellation_token.clone(),
@@ -272,7 +278,7 @@ mod tests {
                 receive_request_tx: receive_request_tx.clone(),
             };
 
-            let grpc_fut = start_grpc_listener(server).await;
+            let grpc_fut = start_grpc_listener(cancellation_token.clone(), server).await;
             let respond_to_commands_fut = start_respond_on_commands_worker(
                 cancellation_token.clone(),
                 receive_request_tx.subscribe(),
@@ -294,7 +300,7 @@ mod tests {
                 cancellation_token,
                 grpc_fut,
                 respond_to_commands_fut,
-                client,
+                _client: client,
                 client_input_tx,
                 receive_request_rx,
             }
@@ -334,26 +340,33 @@ mod tests {
             assert!(
                 matches!(
                     &event,
-                    Ok((_, proto::WorkerPacket { msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand { name })) })) if name == name
+                    Ok((_, proto::WorkerPacket { msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand { name: received_name })) })) if *received_name == name
                 ),
                 "Expected to receive HelloCommand, received {event:?} instead."
             );
 
             self
         }
+
+        pub async fn cancel(self) {
+            self.cancellation_token.cancel();
+
+            let results = tokio::join!(self.grpc_fut, self.respond_to_commands_fut);
+
+            let _ = results.0.unwrap();
+            results.1.unwrap();
+        }
     }
 
     #[tokio::test]
     pub async fn test_receives_hello_command() {
-        let cancellation_token = CancellationToken::new();
-
-        let thing = MasterTesting::new(cancellation_token.clone())
+        MasterTesting::new()
             .await
             .send_hello_command("name")
             .await
             .assert_if_hello_command_has_been_received_on_master("name")
+            .await
+            .cancel()
             .await;
-
-        cancellation_token.cancel();
     }
 }
