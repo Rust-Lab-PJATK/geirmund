@@ -41,16 +41,25 @@ impl proto::master_server::Master for MasterServer {
         let receive_request_cancellation_token = self.cancellation_token.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {
-                    Some(received_event) = in_stream.next() => match received_event {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::error!("GRPC Error received from worker on address {receive_request_socket_addr:?}: {e}");
-                            continue;
-                        }
+                let maybe_event = tokio::select! {
+                    maybe_event = in_stream.next() => maybe_event,
+                    _ = receive_request_cancellation_token.cancelled() => {
+                        break
                     },
-                    _ = receive_request_cancellation_token.cancelled() => break,
                 };
+
+                let event = match maybe_event {
+                    Some(Ok(event)) => event,
+                    Some(Err(e)) => {
+                        tracing::error!(
+                            "GRPC Error received from worker on address {receive_request_socket_addr:?}: {e}"
+                        );
+                        continue;
+                    }
+                    None => break,
+                };
+
+                tracing::debug!(event = tracing::field::debug(&event), "Request received");
 
                 receive_request_tx
                     .send((receive_request_socket_addr, event))
