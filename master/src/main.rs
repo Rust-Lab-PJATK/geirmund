@@ -1,11 +1,13 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
 use std::{net::ToSocketAddrs, pin::Pin};
-use tokio::sync::{broadcast, mpsc};
+use tokio::{
+    sync::{broadcast, mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
-use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct MasterServer {
@@ -133,11 +135,6 @@ async fn main() {
 
     tracing::info!("Creating reflection service...");
 
-    let reflection_service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
-        .build_v1()
-        .unwrap();
-
     let cancellation_token = CancellationToken::new();
 
     let (send_response_tx, send_response_rx) = broadcast::channel(128);
@@ -152,29 +149,55 @@ async fn main() {
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
-    let grpc_server_fut = tokio::spawn(async move {
-        Server::builder()
-            .add_service(reflection_service)
-            .add_service(proto::master_server::MasterServer::new(server))
-            .serve("[::1]:50051".to_socket_addrs().unwrap().next().unwrap())
-            .await
-    });
+    let grpc_server_fut = start_grpc_listener(server).await;
 
     let respond_on_commands_cancellation_token = cancellation_token.clone();
-    let respond_on_commands_fut = tokio::spawn(async move {
-        respond_on_commands(
-            respond_on_commands_cancellation_token,
-            receive_request_rx,
-            send_response_tx,
-        )
-        .await
-    });
+    let respond_on_commands_fut = start_respond_on_commands_worker(
+        respond_on_commands_cancellation_token,
+        receive_request_rx,
+        send_response_tx,
+    );
 
     let (grpc_server_result, respond_on_commands_result) =
         tokio::join!(grpc_server_fut, respond_on_commands_fut);
 
     grpc_server_result.unwrap().unwrap();
     respond_on_commands_result.unwrap();
+}
+
+async fn start_grpc_listener(
+    server: MasterServer,
+) -> JoinHandle<Result<(), tonic::transport::Error>> {
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .unwrap();
+
+    let (ready_tx, ready_rx) = oneshot::channel();
+
+    let fut = tokio::spawn(async move {
+        ready_tx.send(()).unwrap();
+
+        Server::builder()
+            .add_service(reflection_service)
+            .add_service(proto::master_server::MasterServer::new(server))
+            .serve("0.0.0.0:50051".to_socket_addrs().unwrap().next().unwrap())
+            .await
+    });
+
+    ready_rx.await.unwrap();
+
+    fut
+}
+
+fn start_respond_on_commands_worker(
+    cancellation_token: CancellationToken,
+    receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
+    send_response_tx: broadcast::Sender<MasterPacket>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        respond_on_commands(cancellation_token, receive_request_rx, send_response_tx).await
+    })
 }
 
 async fn respond_on_commands(
