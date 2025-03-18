@@ -232,3 +232,128 @@ async fn respond_on_commands(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use proto::{master_client::MasterClient, WorkerPacket};
+    use tokio::{
+        sync::{broadcast, mpsc},
+        task::JoinHandle,
+    };
+    use tokio_stream::wrappers::ReceiverStream;
+    use tokio_util::sync::CancellationToken;
+    use tonic::transport::Channel;
+
+    use crate::{start_grpc_listener, start_respond_on_commands_worker, MasterServer};
+
+    struct MasterTesting {
+        cancellation_token: CancellationToken,
+        grpc_fut: JoinHandle<Result<(), tonic::transport::Error>>,
+        respond_to_commands_fut: JoinHandle<()>,
+        client: MasterClient<Channel>,
+        client_input_tx: mpsc::Sender<WorkerPacket>,
+        receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
+    }
+
+    impl MasterTesting {
+        pub async fn new(cancellation_token: CancellationToken) -> Self {
+            // set up listener
+            let (send_response_tx, send_response_rx) = broadcast::channel(128);
+            let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
+
+            let (client_input_tx, mut client_input_rx) = mpsc::channel::<WorkerPacket>(128);
+
+            let server = MasterServer {
+                cancellation_token: cancellation_token.clone(),
+                send_response_tx: send_response_tx.clone(),
+                send_response_rx,
+                receive_request_tx: receive_request_tx.clone(),
+            };
+
+            let grpc_fut = start_grpc_listener(server).await;
+            let respond_to_commands_fut = start_respond_on_commands_worker(
+                cancellation_token.clone(),
+                receive_request_tx.subscribe(),
+                send_response_tx,
+            );
+
+            // set up stub worker
+
+            let mut client = proto::master_client::MasterClient::connect("http://127.0.0.1:50051")
+                .await
+                .unwrap();
+
+            let _ = client
+                .stream(ReceiverStream::new(client_input_rx))
+                .await
+                .unwrap();
+
+            Self {
+                cancellation_token,
+                grpc_fut,
+                respond_to_commands_fut,
+                client,
+                client_input_tx,
+                receive_request_rx,
+            }
+        }
+
+        pub async fn send_hello_command(self, name: impl Into<String>) -> Self {
+            let name = name.into();
+
+            self.client_input_tx
+                .send(WorkerPacket {
+                    msg: Some(proto::worker_packet::Msg::HelloCommand(
+                        proto::HelloCommand {
+                            name: name.to_string(),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+
+            self
+        }
+
+        pub async fn assert_if_hello_command_has_been_received_on_master(
+            mut self,
+            name: impl Into<String>,
+        ) -> Self {
+            let name = name.into();
+
+            let event = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    assert!(false, "Time exceeded.");
+                    unreachable!();
+                }
+                event = self.receive_request_rx.recv() => event
+            };
+
+            assert!(
+                matches!(
+                    &event,
+                    Ok((_, proto::WorkerPacket { msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand { name })) })) if name == name
+                ),
+                "Expected to receive HelloCommand, received {event:?} instead."
+            );
+
+            self
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_receives_hello_command() {
+        let cancellation_token = CancellationToken::new();
+
+        let thing = MasterTesting::new(cancellation_token.clone())
+            .await
+            .send_hello_command("name")
+            .await
+            .assert_if_hello_command_has_been_received_on_master("name")
+            .await;
+
+        cancellation_token.cancel();
+    }
+}
