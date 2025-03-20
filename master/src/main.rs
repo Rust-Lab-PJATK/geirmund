@@ -504,4 +504,34 @@ mod tests {
             .cancel()
         .await;
     }
+
+    #[tokio::test]
+    pub async fn test_if_you_already_have_a_name_error_handler_works_on_different_name() {
+        let first_packet = WorkerPacket {
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("first_worker") }))
+        };
+
+        let second_packet = WorkerPacket {
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("second_worker") }))
+        };
+
+        MasterTesting::new()
+            .await
+            .connect_new_client(1)
+            .await
+            .send_packet_to_master(1, first_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(first_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("first_worker".to_string()))
+            .await
+            .send_packet_to_master(1, second_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(second_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::you_already_have_a_name_error("first_worker".to_string()))
+            .await
+            .cancel()
+        .await;
+    }
 }
