@@ -10,14 +10,41 @@ message MasterPacket {
   oneof msg {
     LoadCommand load_command = 1;
     GenerateCommand generate_command = 2;
+
+    HelloCommandResponse hello_command_response = 3;
   }
 }
 
+// HelloCommandResponse
+message HelloCommandResponse {
+  oneof result {
+    string ok = 1;
+    HelloCommandResponseError error = 2;
+  }
+}
+
+message HelloCommandResponseError {
+  oneof variant {
+    WorkerWithGivenNameAlreadyExistsError worker_with_given_name_already_exists = 1;
+    YouAlreadyHaveANameError you_already_have_a_name = 2;
+  }
+}
+
+message WorkerWithGivenNameAlreadyExistsError {
+  string name = 1;
+}
+
+message YouAlreadyHaveANameError {
+  string name = 1;
+}
+
+// LoadCommand
 message LoadCommand {
   uint32 id = 1;
   ModelType type = 2;
 }
 
+// GenerateCommand
 message GenerateCommand {
   uint32 id = 1;
   ModelType type = 2;
