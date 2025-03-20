@@ -1,7 +1,5 @@
 use futures::{Stream, StreamExt};
-use proto::{hello_command_response, hello_command_response_error, HelloCommandResponse, HelloCommandResponseError, MasterPacket, WorkerPacket};
-use proto::master_packet::Msg as MasterPacketMsg;
-use tracing::Level;
+use proto::{MasterPacket, WorkerPacket};
 use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, pin::Pin};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
@@ -205,7 +203,12 @@ fn start_respond_on_commands_worker(
     send_response_tx: broadcast::Sender<MasterPacket>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        respond_on_commands(cancellation_token, receive_request_rx, send_response_tx).await
+        let error_cancellation_token = cancellation_token.clone();
+
+        if let Err(error) = respond_on_commands(cancellation_token, receive_request_rx, send_response_tx).await {
+            tracing::error!(error = ?error, "Failed to send request to socket handler to send a request with MasterPacket");
+            error_cancellation_token.cancel();
+        }
     })
 }
 
@@ -213,7 +216,7 @@ async fn respond_on_commands(
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<MasterPacket>,
-) {
+) -> Result<(), broadcast::error::SendError<MasterPacket>> {
     let mut clients: HashMap<SocketAddr, String> = HashMap::new();
 
     loop {
@@ -225,7 +228,7 @@ async fn respond_on_commands(
                     continue;
                 },
             },
-            _ = cancellation_token.cancelled() => {break;}
+            _ = cancellation_token.cancelled() => return Ok(()),
         };
 
         let (socket_addr, _) = request;
@@ -239,15 +242,13 @@ async fn respond_on_commands(
                 if let Some(current_name) = clients.get(&socket_addr) {
                     send_response_tx.send(
                         protobuf::master::HelloCommandResponse::you_already_have_a_name_error(current_name.clone())
-                    )
-                        .unwrap();
+                    )?;
 
                     tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
                 } else if clients.values().into_iter().find(|addr| **addr == hello_command.name).is_some() {
                     send_response_tx.send(
                         protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
-                    )
-                        .unwrap();
+                    )?;
 
                     tracing::error!(socket_addr = ?socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
                 } else {
@@ -255,7 +256,7 @@ async fn respond_on_commands(
 
                     clients.insert(socket_addr, name.clone());
 
-                    send_response_tx.send(protobuf::master::HelloCommandResponse::ok(name.clone()));
+                    send_response_tx.send(protobuf::master::HelloCommandResponse::ok(name.clone()))?;
 
                     tracing::info!(socket_addr = ?socket_addr, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him");
                 }
