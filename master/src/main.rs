@@ -268,9 +268,10 @@ async fn respond_on_commands(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashMap, time::Duration};
 
-    use proto::{master_client::MasterClient, HelloCommand, WorkerPacket};
+    use futures::StreamExt;
+    use proto::{master_client::MasterClient, HelloCommand, MasterPacket, WorkerPacket};
     use tokio::{
         sync::{broadcast, mpsc},
         task::JoinHandle,
@@ -280,15 +281,14 @@ mod tests {
     use tonic::transport::Channel;
     use proto::worker_packet::Msg as WorkerPacketMsg;
 
-    use crate::{start_grpc_listener, start_respond_on_commands_worker, MasterServer};
+    use crate::{protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer};
 
     struct MasterTesting {
         cancellation_token: CancellationToken,
         grpc_fut: JoinHandle<Option<Result<(), tonic::transport::Error>>>,
         respond_to_commands_fut: JoinHandle<()>,
-        _client: MasterClient<Channel>,
-        client_input_tx: mpsc::Sender<WorkerPacket>,
         receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
+        clients: HashMap<i32, MasterTestingClient>
     }
 
     impl MasterTesting {
@@ -297,8 +297,6 @@ mod tests {
             // set up listener
             let (send_response_tx, send_response_rx) = broadcast::channel(128);
             let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
-
-            let (client_input_tx, client_input_rx) = mpsc::channel::<WorkerPacket>(128);
 
             let server = MasterServer {
                 cancellation_token: cancellation_token.clone(),
@@ -314,32 +312,32 @@ mod tests {
                 send_response_tx,
             );
 
-            // set up stub worker
-
-            let mut client = proto::master_client::MasterClient::connect("http://127.0.0.1:50051")
-                .await
-                .unwrap();
-
-            let _ = client
-                .stream(ReceiverStream::new(client_input_rx))
-                .await
-                .unwrap();
-
             Self {
                 cancellation_token,
                 grpc_fut,
                 respond_to_commands_fut,
-                _client: client,
-                client_input_tx,
                 receive_request_rx,
+                clients: HashMap::new(),
             }
         }
 
-        pub async fn send_packet(self, packet: proto::WorkerPacket) -> Self {
-            self.client_input_tx
+        pub async fn connect_new_client(mut self, id: i32) -> Self{
+            if self.clients.contains_key(&id) {
+                panic!("Client with id {id} is already connected.");
+            }
+
+            self.clients.insert(id, MasterTestingClient::new(self.cancellation_token.clone()).await);
+
+            self
+        }
+
+        pub async fn send_packet_to_master(mut self, client_id: i32, packet: proto::WorkerPacket) -> Self {
+            let client = self.clients.remove(&client_id)
+                .unwrap()
                 .send(packet)
-                .await
-                .unwrap();
+                .await;
+
+            self.clients.insert(client_id, client);
 
             self
         }
@@ -375,6 +373,92 @@ mod tests {
             let _ = results.0.unwrap();
             results.1.unwrap();
         }
+
+        pub async fn assert_if_identical_packet_has_been_received_on_worker(mut self, client_id: i32, packet: MasterPacket) -> Self {
+            let client = self.clients.remove(&client_id).unwrap().assert_packet_received(packet).await;
+            self.clients.insert(client_id, client);
+
+            self
+        }
+    }
+
+    struct MasterTestingClient {
+        client: MasterClient<Channel>,
+        send_request_tx: mpsc::Sender<WorkerPacket>,
+        receive_response_rx: mpsc::Receiver<MasterPacket>,
+    }
+
+    impl MasterTestingClient {
+        pub async fn new(cancellation_token: CancellationToken) -> Self {
+            let (send_request_tx, send_request_rx) = mpsc::channel(128);
+            let (receive_response_tx, receive_response_rx) = mpsc::channel(128);
+
+            // set up stub worker
+
+            let mut client = proto::master_client::MasterClient::connect("http://127.0.0.1:50051")
+                .await
+                .unwrap();
+
+            let response = client
+                .stream(ReceiverStream::new(send_request_rx))
+                .await
+                .unwrap();
+
+            let mut response_stream = response.into_inner();
+
+            let response_cancellation_token = cancellation_token.clone();
+            tokio::spawn(async move {
+                loop {
+                    let message = tokio::select! {
+                        _ = response_cancellation_token.cancelled() => break,
+                        message = response_stream.next() => message,
+                    };
+
+                    let message = match message {
+                        Some(Ok(message)) => message,
+                        Some(Err(e)) => {
+                            // We do a paic here, because it's testing and the errors for our app
+                            // should be self-contained in protobuf types
+                            panic!("Received GRPC error from master, error: {e:?}");
+                        },
+                        // connection between the worker and master has probably ended
+                        None => break,
+                    };
+
+                    receive_response_tx.send(message).await.unwrap();
+
+                }
+            });
+
+            Self {
+                client,
+                send_request_tx,
+                receive_response_rx,
+            }
+       }
+
+        pub async fn send(self, packet: WorkerPacket) -> Self {
+            self.send_request_tx.send(packet).await.unwrap();
+
+            self
+        }
+
+        pub async fn assert_packet_received(mut self, packet: MasterPacket) -> Self{
+            let event = tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    assert!(false, "Time exceeded.");
+                    unreachable!();
+                }
+                event = self.receive_response_rx.recv() => event
+            };
+
+            assert!(
+                matches!(&event, Some(received_packet) if *received_packet == packet),
+                "Expected to receive identical HelloCommand {packet:?}, received {event:?} instead."
+            );
+
+            self
+        }
     }
 
     #[tokio::test]
@@ -385,11 +469,39 @@ mod tests {
 
         MasterTesting::new()
             .await
-            .send_packet(packet.clone())
+            .connect_new_client(1)
+            .await
+            .send_packet_to_master(1, packet.clone())
             .await
             .assert_if_identical_packet_has_been_received_on_master(packet)
             .await
             .cancel()
             .await;
+    }
+
+    #[tokio::test]
+    pub async fn test_if_you_already_have_a_name_error_handler_works_on_same_name() {
+        let packet = WorkerPacket {
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("helloworld") }))
+        };
+
+        MasterTesting::new()
+            .await
+            .connect_new_client(1)
+            .await
+            .send_packet_to_master(1, packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("helloworld".to_string()))
+            .await
+            .send_packet_to_master(1, packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::you_already_have_a_name_error("helloworld".to_string()))
+            .await
+            .cancel()
+        .await;
     }
 }
