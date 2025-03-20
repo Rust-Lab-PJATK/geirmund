@@ -50,9 +50,7 @@ pub mod master {
                                 proto::hello_command_response::Result::Error(
                                     proto::HelloCommandResponseError {
                                         variant: Some(
-                                            proto::hello_command_response_error::Variant::WorkerWithGivenNameAlreadyExists(
-                                                name
-                                            )
+                                            proto::hello_command_response_error::Variant::WorkerWithGivenNameAlreadyExists(proto::WorkerWithGivenNameAlreadyExistsError { name })
                                         )
                                     }
                                 )
