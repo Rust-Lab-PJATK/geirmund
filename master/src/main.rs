@@ -539,4 +539,28 @@ mod tests {
             .cancel()
         .await;
     }
+
+    #[tokio::test]
+    pub async fn test_if_worker_with_given_name_already_exists_handler_works() {
+        let packet = WorkerPacket {
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("first_worker") }))
+        };
+
+        MasterTesting::new()
+            .await
+            .connect_new_client(1).await
+            .connect_new_client(2).await
+            .send_packet_to_master(1, packet.clone()).await
+            .assert_if_identical_packet_has_been_received_on_master(packet.clone()).await
+            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("first_worker".to_string()))
+            .await
+            .send_packet_to_master(2, packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(2, protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists("first_worker".to_string()))
+            .await
+            .cancel()
+            .await;
+    }
 }
