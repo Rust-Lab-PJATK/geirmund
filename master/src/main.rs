@@ -14,8 +14,8 @@ mod protobuf;
 
 pub struct MasterServer {
     cancellation_token: CancellationToken,
-    send_response_tx: broadcast::Sender<MasterPacket>,
-    send_response_rx: broadcast::Receiver<MasterPacket>,
+    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
+    send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
     receive_request_tx: broadcast::Sender<(core::net::SocketAddr, WorkerPacket)>,
 }
 
@@ -72,35 +72,38 @@ impl proto::master_server::Master for MasterServer {
         });
 
         // Send response to worker
+        let (out_stream_tx, out_stream_rx) = mpsc::channel::<Result<MasterPacket, Status>>(128);
 
-        let mut send_response_tx = self.send_response_tx.subscribe();
-
-        let (out_stream_tx, out_stream_rx) = mpsc::channel(128);
-
-        let send_response_socket_addr = socket_addr;
-        let send_response_cancellation_token = self.cancellation_token.clone();
-        tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    received_event = send_response_tx.recv() => match received_event {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::error!("recoverable error received on local_send_request_receiver on worker address {send_response_socket_addr:?}: {e}");
-                            continue;
-                        }
-                    },
-                    _ = send_response_cancellation_token.cancelled() => break,
-                };
-
-                if let Err(e) = out_stream_tx.send(Ok(event)).await {
-                    tracing::error!("recoverable error received when trying to pass MasterPacket from local_send_request_receiver to tx: {e}");
-                }
-            }
-        });
+        tokio::spawn(MasterServer::send_response_worker(self.send_response_tx.subscribe(), out_stream_tx.clone(), self.cancellation_token.clone(), socket_addr.clone()));
 
         let out_stream = ReceiverStream::new(out_stream_rx);
 
         Ok(Response::new(Box::pin(out_stream) as Self::StreamStream))
+    }
+}
+
+impl MasterServer {
+    async fn send_response_worker(mut send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>, out_stream_tx: mpsc::Sender<Result<MasterPacket, Status>>, cancellation_token: CancellationToken, socket_addr: SocketAddr) {
+        loop {
+            let (event_socket_addr, event_data) = tokio::select! {
+                received_event = send_response_rx.recv() => match received_event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!("recoverable error received on local_send_request_receiver on worker address {socket_addr:?}: {e}");
+                        continue;
+                    }
+                },
+                _ = cancellation_token.cancelled() => break,
+            };
+
+            if socket_addr != event_socket_addr {
+                continue;
+            }
+
+            if let Err(e) = out_stream_tx.send(Ok(event_data)).await {
+                tracing::error!("recoverable error received when trying to pass MasterPacket from local_send_request_receiver to tx: {e}");
+            }
+        }
     }
 }
 
@@ -200,7 +203,7 @@ async fn start_grpc_listener(
 fn start_respond_on_commands_worker(
     cancellation_token: CancellationToken,
     receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-    send_response_tx: broadcast::Sender<MasterPacket>,
+    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let error_cancellation_token = cancellation_token.clone();
@@ -215,8 +218,8 @@ fn start_respond_on_commands_worker(
 async fn respond_on_commands(
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-    send_response_tx: broadcast::Sender<MasterPacket>,
-) -> Result<(), broadcast::error::SendError<MasterPacket>> {
+    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
+) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
     let mut clients: HashMap<SocketAddr, String> = HashMap::new();
 
     loop {
@@ -240,15 +243,17 @@ async fn respond_on_commands(
                 tracing::info!(socket_addr = ?socket_addr, requested_worker_name = %hello_command.name, "Received Hello! from worker");
 
                 if let Some(current_name) = clients.get(&socket_addr) {
-                    send_response_tx.send(
+                    send_response_tx.send((
+                        socket_addr,
                         protobuf::master::HelloCommandResponse::you_already_have_a_name_error(current_name.clone())
-                    )?;
+                    ))?;
 
                     tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
                 } else if clients.values().into_iter().find(|addr| **addr == hello_command.name).is_some() {
-                    send_response_tx.send(
+                    send_response_tx.send((
+                        socket_addr,
                         protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
-                    )?;
+                    ))?;
 
                     tracing::error!(socket_addr = ?socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
                 } else {
@@ -256,7 +261,7 @@ async fn respond_on_commands(
 
                     clients.insert(socket_addr, name.clone());
 
-                    send_response_tx.send(protobuf::master::HelloCommandResponse::ok(name.clone()))?;
+                    send_response_tx.send((socket_addr, protobuf::master::HelloCommandResponse::ok(name.clone())))?;
 
                     tracing::info!(socket_addr = ?socket_addr, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him");
                 }
