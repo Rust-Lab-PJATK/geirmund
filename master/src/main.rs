@@ -13,6 +13,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod protobuf;
 
 pub struct MasterServer {
+    port: u16,
     cancellation_token: CancellationToken,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
     send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
@@ -146,6 +147,7 @@ async fn main() {
     let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
 
     let server = MasterServer {
+        port: 50010,
         cancellation_token: cancellation_token.clone(),
         send_response_tx: send_response_tx.clone(),
         send_response_rx,
@@ -181,6 +183,8 @@ async fn start_grpc_listener(
 
     let (ready_tx, ready_rx) = oneshot::channel();
 
+    let server_port = server.port;
+
     let fut = tokio::spawn(async move {
         cancellation_token
             .run_until_cancelled(async {
@@ -189,7 +193,7 @@ async fn start_grpc_listener(
                 Server::builder()
                     .add_service(reflection_service)
                     .add_service(proto::master_server::MasterServer::new(server))
-                    .serve("0.0.0.0:50051".to_socket_addrs().unwrap().next().unwrap())
+                    .serve(format!("0.0.0.0:{}", server_port).to_socket_addrs().unwrap().next().unwrap())
                     .await
             })
             .await
@@ -289,6 +293,7 @@ mod tests {
     use crate::{protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer};
 
     struct MasterTesting {
+        server_port: u16,
         cancellation_token: CancellationToken,
         grpc_fut: JoinHandle<Option<Result<(), tonic::transport::Error>>>,
         respond_to_commands_fut: JoinHandle<()>,
@@ -303,7 +308,10 @@ mod tests {
             let (send_response_tx, send_response_rx) = broadcast::channel(128);
             let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
 
+            let server_port = 10000 + rand::random::<u16>() % 50000;
+
             let server = MasterServer {
+                port: server_port,
                 cancellation_token: cancellation_token.clone(),
                 send_response_tx: send_response_tx.clone(),
                 send_response_rx,
@@ -318,6 +326,7 @@ mod tests {
             );
 
             Self {
+                server_port,
                 cancellation_token,
                 grpc_fut,
                 respond_to_commands_fut,
@@ -331,7 +340,7 @@ mod tests {
                 panic!("Client with id {id} is already connected.");
             }
 
-            self.clients.insert(id, MasterTestingClient::new(self.cancellation_token.clone()).await);
+            self.clients.insert(id, MasterTestingClient::new(self.cancellation_token.clone(), self.server_port).await);
 
             self
         }
@@ -402,13 +411,13 @@ mod tests {
     }
 
     impl MasterTestingClient {
-        pub async fn new(cancellation_token: CancellationToken) -> Self {
+        pub async fn new(cancellation_token: CancellationToken, port: u16) -> Self {
             let (send_request_tx, send_request_rx) = mpsc::channel(128);
             let (receive_response_tx, receive_response_rx) = mpsc::channel(128);
 
             // set up stub worker
 
-            let mut client = proto::master_client::MasterClient::connect("http://127.0.0.1:50051")
+            let mut client = proto::master_client::MasterClient::connect(format!("http://127.0.0.1:{}", port))
                 .await
                 .unwrap();
 
