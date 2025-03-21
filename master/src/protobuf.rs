@@ -62,3 +62,17 @@ pub mod master {
         }
     }
 }
+
+pub mod worker {
+    pub struct HelloCommand;
+
+    impl HelloCommand {
+        pub fn new(name: String) -> proto::WorkerPacket {
+            proto::WorkerPacket {
+                msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand {
+                    name,
+                }))
+            }
+        }
+    }
+}

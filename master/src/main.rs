@@ -402,6 +402,18 @@ mod tests {
 
             self
         }
+
+        pub async fn connect_worker_and_register_it(mut self, client_id: i32, name: impl Into<String>) -> Self {
+            let name = name.into();
+
+            let request_packet = protobuf::worker::HelloCommand::new(name.clone());
+            let response_packet = protobuf::master::HelloCommandResponse::ok(name);
+
+            self.connect_new_client(client_id).await
+                .send_packet_to_master(client_id, request_packet.clone()).await
+                .assert_if_identical_packet_has_been_received_on_master(request_packet).await
+                .assert_if_identical_packet_has_been_received_on_worker(client_id, response_packet).await
+        }
     }
 
     struct MasterTestingClient {
