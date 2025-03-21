@@ -385,6 +385,14 @@ mod tests {
 
             self
         }
+
+
+        pub async fn assert_no_more_packets_received_on_worker(mut self, client_id: i32) -> Self {
+            let client = self.clients.remove(&client_id).unwrap().assert_no_packets_received().await;
+            self.clients.insert(client_id, client);
+
+            self
+        }
     }
 
     struct MasterTestingClient {
@@ -463,6 +471,14 @@ mod tests {
             );
 
             self
+        }
+
+        pub async fn assert_no_packets_received(mut self) -> Self{
+            match self.receive_response_rx.try_recv() {
+                Ok(packet) => panic!("Expected no packets to be received, but received a {packet:?} instead."),
+                Err(mpsc::error::TryRecvError::Empty) => self,
+                Err(mpsc::error::TryRecvError::Disconnected) => self,
+            }
         }
     }
 
