@@ -223,64 +223,148 @@ fn start_respond_on_commands_worker(
     })
 }
 
-
-struct StateShape {
-    worker_names: HashMap<SocketAddr, String>
+#[derive(Clone)]
+struct WorkerState {
+    address: SocketAddr,
+    name: Option<String>,
+    status: WorkerStatus,
 }
 
+#[derive(Default, Clone)]
+enum WorkerStatus {
+    #[default]
+    NotInitialized,
+    Registered { name: String },
+    WaitingForWorkerToLoadModel { model: String },
+    WaitingForMasterToSendInput { loaded_model: String },
+    GeneratingResponse { input: String },
+}
+
+struct StateShape {
+    workers: Vec<WorkerState>,
+    change_signal_tx: broadcast::Sender<()>,
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("worker with given socket address {socket_addr}, does not exist")]
+struct WorkerWithGivenSocketAddressDoesNotExist { socket_addr: SocketAddr }
+
 impl StateShape {
-    pub fn new() -> Self {
+    pub fn new(change_signal_tx: broadcast::Sender<()>) -> Self {
         Self {
-            worker_names: HashMap::new(),
+            workers: Vec::new(),
+            change_signal_tx,
         }
     }
 
-    pub fn add_worker_name_to_socket_addr_mapping(&mut self, socket_addr: SocketAddr, worker_name: impl Into<String>) {
+    pub fn add_worker(&mut self, socket_addr: SocketAddr) {
+        self.workers.push(WorkerState {
+            address: socket_addr,
+            name: None,
+            status: WorkerStatus::default(),
+        });
+
+        self.change_signal_tx.send(());
+    }
+
+    pub fn assign_worker_a_name(&mut self, socket_addr: SocketAddr, worker_name: impl Into<String>) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
         let worker_name = worker_name.into();
-        self.worker_names.insert(socket_addr, worker_name);
+
+        let mut position = self.workers.iter().position(|worker| worker.address == socket_addr)
+            .ok_or(WorkerWithGivenSocketAddressDoesNotExist { socket_addr })?
+            .clone();
+
+        let mut worker = self.workers.remove(position);
+
+        worker.name = Some(worker_name);
+
+        self.workers.push(worker);
+
+        self.change_signal_tx.send(());
+
+        Ok(())
     }
 
-    pub fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> Option<&String> {
-        self.worker_names.get(socket_addr)
+    pub fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> &Option<String> {
+        match self.workers.iter().find(|value| value.address == *socket_addr).map(|value| &value.name) {
+            Some(worker_state) => worker_state,
+            None => &None,
+        }
     }
 
-    pub fn get_socket_addr_by_worker_name(&self, worker_name: &str) -> Option<&str> {
-        self.worker_names.values()
-            .into_iter()
-            .find(|addr| **addr == worker_name)
-            .map(|addr| addr.as_str())
+    pub fn get_socket_addr_by_worker_name(&self, worker_name: String) -> Option<&SocketAddr> {
+        let position = self.workers.iter().position(|worker| worker.name.as_ref() == Some(&worker_name));
+
+        match position {
+            Some(nth) => Some(&self.workers[nth].address),
+            None => None,
+        }
     }
 }
 
-#[derive(Clone)]
 struct State {
     shape: std::sync::Arc<tokio::sync::Mutex<StateShape>>,
+    change_signal_tx: broadcast::Sender<()>,
+    change_signal_rx: broadcast::Receiver<()>,
+}
+
+impl Clone for State {
+    fn clone(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            change_signal_tx: self.change_signal_tx.clone(),
+            change_signal_rx: self.change_signal_tx.subscribe(),
+        }
+    }
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { shape: Arc::new(tokio::sync::Mutex::new(StateShape::new())) }
+        let (change_signal_tx, change_signal_rx) = broadcast::channel(128);
+
+        Self {
+            shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(change_signal_tx.clone()))),
+            change_signal_rx,
+            change_signal_tx
+        }
     }
 
-    pub async fn add_worker_name_to_socket_addr_mapping(&self, socket_addr: SocketAddr, worker_name: impl Into<String>) {
+    pub async fn add_worker_name_to_socket_addr_mapping(&self, socket_addr: SocketAddr, worker_name: impl Into<String>) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
-        shape.add_worker_name_to_socket_addr_mapping(socket_addr, worker_name);
+        shape.assign_worker_a_name(socket_addr, worker_name)
     }
 
     pub async fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> Option<String> {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
-        shape.get_worker_name_by_socket_addr(socket_addr).map(|value| value.to_string())
+        shape.get_worker_name_by_socket_addr(socket_addr).clone()
     }
 
-    pub async fn get_socket_addr_by_worker_name(&self, worker_name: &str) -> Option<String> {
+    pub async fn get_socket_addr_by_worker_name(&self, worker_name: String) -> Option<SocketAddr> {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
-        shape.get_socket_addr_by_worker_name(worker_name).map(|value| value.to_string())
+        shape.get_socket_addr_by_worker_name(worker_name).cloned()
+    }
+
+    pub async fn workers(&self) -> Vec<WorkerState> {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        shape.workers.clone()
+    }
+
+    pub async fn changed(&mut self) {
+        loop {
+            if let Err(e) = self.change_signal_rx.recv().await {
+                tracing::debug!(error = ?e, "Recoverable (and probably not imporatant) error received while waiting on change_signal_rx");
+            } else {
+                break;
+            }
+        }
     }
 }
 
