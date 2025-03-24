@@ -1,6 +1,6 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
-use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, pin::Pin};
+use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, pin::Pin, sync::Arc};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
@@ -158,8 +158,11 @@ async fn main() {
 
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
+    let state = State::new();
+
     let respond_on_commands_cancellation_token = cancellation_token.clone();
     let respond_on_commands_fut = start_respond_on_commands_worker(
+        state.clone(),
         respond_on_commands_cancellation_token,
         receive_request_rx,
         send_response_tx,
@@ -205,6 +208,7 @@ async fn start_grpc_listener(
 }
 
 fn start_respond_on_commands_worker(
+    state: State,
     cancellation_token: CancellationToken,
     receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
@@ -212,7 +216,7 @@ fn start_respond_on_commands_worker(
     tokio::spawn(async move {
         let error_cancellation_token = cancellation_token.clone();
 
-        if let Err(error) = respond_on_commands(cancellation_token, receive_request_rx, send_response_tx).await {
+        if let Err(error) = respond_on_commands(state, cancellation_token, receive_request_rx, send_response_tx).await {
             tracing::error!(error = ?error, "Failed to send request to socket handler to send a request with MasterPacket");
             error_cancellation_token.cancel();
         }
@@ -220,11 +224,11 @@ fn start_respond_on_commands_worker(
 }
 
 
-struct RespondOnCommandsState {
+struct StateShape {
     worker_names: HashMap<SocketAddr, String>
 }
 
-impl RespondOnCommandsState {
+impl StateShape {
     pub fn new() -> Self {
         Self {
             worker_names: HashMap::new(),
@@ -248,13 +252,44 @@ impl RespondOnCommandsState {
     }
 }
 
+#[derive(Clone)]
+struct State {
+    shape: std::sync::Arc<tokio::sync::Mutex<StateShape>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self { shape: Arc::new(tokio::sync::Mutex::new(StateShape::new())) }
+    }
+
+    pub async fn add_worker_name_to_socket_addr_mapping(&self, socket_addr: SocketAddr, worker_name: impl Into<String>) {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        shape.add_worker_name_to_socket_addr_mapping(socket_addr, worker_name);
+    }
+
+    pub async fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> Option<String> {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        shape.get_worker_name_by_socket_addr(socket_addr).map(|value| value.to_string())
+    }
+
+    pub async fn get_socket_addr_by_worker_name(&self, worker_name: &str) -> Option<String> {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        shape.get_socket_addr_by_worker_name(worker_name).map(|value| value.to_string())
+    }
+}
+
 async fn respond_on_commands(
+    state: State,
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
 ) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
-    let mut state = RespondOnCommandsState::new();
-
     loop {
         let request = tokio::select! {
             received_req = receive_request_rx.recv() => match received_req {
@@ -272,28 +307,28 @@ async fn respond_on_commands(
         match request.1 {
             WorkerPacket {
                 msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-            } => respond_on_hello_command(&mut state, socket_addr, hello_command, send_response_tx.clone()).await?
+            } => respond_on_hello_command(state.clone(), socket_addr, hello_command, send_response_tx.clone()).await?,
             _ => unimplemented!(),
         }
     }
 }
 
 async fn respond_on_hello_command(
-    state: &mut RespondOnCommandsState, 
+    state: State, 
     socket_addr: SocketAddr, 
     hello_command: proto::HelloCommand, 
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>
 ) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
     tracing::info!(socket_addr = ?socket_addr, requested_worker_name = %hello_command.name, "Received Hello! from worker");
 
-    if let Some(current_name) = state.get_worker_name_by_socket_addr(&socket_addr) {
+    if let Some(current_name) = state.get_worker_name_by_socket_addr(&socket_addr).await {
         send_response_tx.send((
             socket_addr,
             protobuf::master::HelloCommandResponse::you_already_have_a_name_error(current_name.clone())
         ))?;
 
         tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
-    } else if state.get_socket_addr_by_worker_name(&hello_command.name).is_some() {
+    } else if state.get_socket_addr_by_worker_name(&hello_command.name).await.is_some() {
         send_response_tx.send((
             socket_addr,
             protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
@@ -303,7 +338,7 @@ async fn respond_on_hello_command(
     } else {
         let proto::HelloCommand { name } = hello_command;
 
-        state.add_worker_name_to_socket_addr_mapping(socket_addr, name.clone());
+        state.add_worker_name_to_socket_addr_mapping(socket_addr, name.clone()).await;
 
         send_response_tx.send((socket_addr, protobuf::master::HelloCommandResponse::ok(name.clone())))?;
 
@@ -328,7 +363,7 @@ mod tests {
     use tonic::transport::Channel;
     use proto::worker_packet::Msg as WorkerPacketMsg;
 
-    use crate::{protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer};
+    use crate::{protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer, State};
 
     struct MasterTesting {
         server_port: u16,
@@ -357,7 +392,9 @@ mod tests {
             };
 
             let grpc_fut = start_grpc_listener(cancellation_token.clone(), server).await;
+            let state = State::new();
             let respond_to_commands_fut = start_respond_on_commands_worker(
+                state,
                 cancellation_token.clone(),
                 receive_request_tx.subscribe(),
                 send_response_tx,
