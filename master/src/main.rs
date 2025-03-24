@@ -219,12 +219,41 @@ fn start_respond_on_commands_worker(
     })
 }
 
+
+struct RespondOnCommandsState {
+    worker_names: HashMap<SocketAddr, String>
+}
+
+impl RespondOnCommandsState {
+    pub fn new() -> Self {
+        Self {
+            worker_names: HashMap::new(),
+        }
+    }
+
+    pub fn add_worker_name_to_socket_addr_mapping(&mut self, socket_addr: SocketAddr, worker_name: impl Into<String>) {
+        let worker_name = worker_name.into();
+        self.worker_names.insert(socket_addr, worker_name);
+    }
+
+    pub fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> Option<&String> {
+        self.worker_names.get(socket_addr)
+    }
+
+    pub fn get_socket_addr_by_worker_name(&self, worker_name: &str) -> Option<&str> {
+        self.worker_names.values()
+            .into_iter()
+            .find(|addr| **addr == worker_name)
+            .map(|addr| addr.as_str())
+    }
+}
+
 async fn respond_on_commands(
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
 ) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
-    let mut clients: HashMap<SocketAddr, String> = HashMap::new();
+    let mut state = RespondOnCommandsState::new();
 
     loop {
         let request = tokio::select! {
@@ -243,36 +272,45 @@ async fn respond_on_commands(
         match request.1 {
             WorkerPacket {
                 msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-            } => {
-                tracing::info!(socket_addr = ?socket_addr, requested_worker_name = %hello_command.name, "Received Hello! from worker");
-
-                if let Some(current_name) = clients.get(&socket_addr) {
-                    send_response_tx.send((
-                        socket_addr,
-                        protobuf::master::HelloCommandResponse::you_already_have_a_name_error(current_name.clone())
-                    ))?;
-
-                    tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
-                } else if clients.values().into_iter().find(|addr| **addr == hello_command.name).is_some() {
-                    send_response_tx.send((
-                        socket_addr,
-                        protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
-                    ))?;
-
-                    tracing::error!(socket_addr = ?socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
-                } else {
-                    let proto::HelloCommand { name } = hello_command;
-
-                    clients.insert(socket_addr, name.clone());
-
-                    send_response_tx.send((socket_addr, protobuf::master::HelloCommandResponse::ok(name.clone())))?;
-
-                    tracing::info!(socket_addr = ?socket_addr, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him");
-                }
-            }
+            } => respond_on_hello_command(&mut state, socket_addr, hello_command, send_response_tx.clone()).await?
             _ => unimplemented!(),
         }
     }
+}
+
+async fn respond_on_hello_command(
+    state: &mut RespondOnCommandsState, 
+    socket_addr: SocketAddr, 
+    hello_command: proto::HelloCommand, 
+    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>
+) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
+    tracing::info!(socket_addr = ?socket_addr, requested_worker_name = %hello_command.name, "Received Hello! from worker");
+
+    if let Some(current_name) = state.get_worker_name_by_socket_addr(&socket_addr) {
+        send_response_tx.send((
+            socket_addr,
+            protobuf::master::HelloCommandResponse::you_already_have_a_name_error(current_name.clone())
+        ))?;
+
+        tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
+    } else if state.get_socket_addr_by_worker_name(&hello_command.name).is_some() {
+        send_response_tx.send((
+            socket_addr,
+            protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
+        ))?;
+
+        tracing::error!(socket_addr = ?socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
+    } else {
+        let proto::HelloCommand { name } = hello_command;
+
+        state.add_worker_name_to_socket_addr_mapping(socket_addr, name.clone());
+
+        send_response_tx.send((socket_addr, protobuf::master::HelloCommandResponse::ok(name.clone())))?;
+
+        tracing::info!(socket_addr = ?socket_addr, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
