@@ -481,7 +481,7 @@ async fn respond_on_commands(
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
+) -> Result<(), RespondOnHelloCommandError> {
     loop {
         let request = tokio::select! {
             received_req = receive_request_rx.recv() => match received_req {
@@ -499,10 +499,20 @@ async fn respond_on_commands(
         match request.1 {
             WorkerPacket {
                 msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-            } => respond_on_hello_command(state.clone(), socket_addr, hello_command, send_response_tx.clone()).await?,
+            } => 
+                respond_on_hello_command(state.clone(), socket_addr, hello_command, send_response_tx.clone()).await?,
             _ => unimplemented!(),
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+enum RespondOnHelloCommandError {
+    #[error("broadcast channel error: {0:?}")]
+    ChannelError(#[from] broadcast::error::SendError<(SocketAddr, MasterPacket)>),
+
+    #[error("worker with given socket addr does not exist: {0:?}")]
+    WorkerWithGivenSocketAddrDoesNotExist(#[from] WorkerWithGivenSocketAddressDoesNotExist),
 }
 
 async fn respond_on_hello_command(
@@ -510,7 +520,7 @@ async fn respond_on_hello_command(
     socket_addr: SocketAddr, 
     hello_command: proto::HelloCommand, 
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>
-) -> Result<(), broadcast::error::SendError<(SocketAddr, MasterPacket)>> {
+) -> Result<(), RespondOnHelloCommandError> {
     tracing::info!(socket_addr = ?socket_addr, requested_worker_name = %hello_command.name, "Received Hello! from worker");
 
     if let Some(current_name) = state.get_worker_name_by_socket_addr(&socket_addr).await {
@@ -520,7 +530,7 @@ async fn respond_on_hello_command(
         ))?;
 
         tracing::error!(socket_addr = ?socket_addr, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
-    } else if state.get_socket_addr_by_worker_name(&hello_command.name).await.is_some() {
+    } else if state.get_socket_addr_by_worker_name(hello_command.name.clone()).await.is_some() {
         send_response_tx.send((
             socket_addr,
             protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(hello_command.name.clone())
@@ -530,7 +540,7 @@ async fn respond_on_hello_command(
     } else {
         let proto::HelloCommand { name } = hello_command;
 
-        state.add_worker_name_to_socket_addr_mapping(socket_addr, name.clone()).await;
+        state.add_worker_name_to_socket_addr_mapping(socket_addr, name.clone()).await?;
 
         send_response_tx.send((socket_addr, protobuf::master::HelloCommandResponse::ok(name.clone())))?;
 
