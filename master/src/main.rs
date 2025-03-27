@@ -20,6 +20,8 @@ pub struct MasterServer {
     receive_request_tx: broadcast::Sender<(core::net::SocketAddr, WorkerPacket)>,
     connected_tx: broadcast::Sender<SocketAddr>,
     disconnected_tx: broadcast::Sender<SocketAddr>,
+    please_disconnect_tx: broadcast::Sender<SocketAddr>,
+    please_disconnect_rx: broadcast::Receiver<SocketAddr>,
 }
 
 #[tonic::async_trait]
@@ -43,50 +45,28 @@ impl proto::master_server::Master for MasterServer {
 
         // When client disconnects we need to send cancellation to the tokio worker
         // that sends responses to the worker.
-        let connected_cancellation_token = CancellationToken::new();
+        let connection_cancellation_token = CancellationToken::new();
 
         // Receive request from worker
-
         let mut in_stream = request.into_inner();
 
-        {
-            let receive_request_tx = self.receive_request_tx.clone();
-            let socket_addr = socket_addr.clone();
-            let global_cancellation_token = self.cancellation_token.clone();
-            let connected_cancellation_token = connected_cancellation_token.clone();
-            let disconnected_tx = self.disconnected_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    let maybe_event = tokio::select! {
-                        maybe_event = in_stream.next() => maybe_event,
-                        _ = global_cancellation_token.cancelled() => {
-                            break
-                        },
-                    };
+        tokio::spawn(MasterServer::receive_request_worker(
+            self.cancellation_token.clone(),
+            connection_cancellation_token.clone(),
+            socket_addr.clone(),
+            in_stream,
+            self.receive_request_tx.clone(),
+            self.disconnected_tx.clone()
+        ));
 
-                    let event = match maybe_event {
-                        Some(Ok(event)) => event,
-                        Some(Err(e)) => {
-                            tracing::error!(
-                                "GRPC Error received from worker on address {socket_addr:?}: {e}"
-                            );
-                            continue;
-                        }
-                        None => {
-                            disconnected_tx.send(socket_addr);
-                            connected_cancellation_token.cancel();
-                            break;
-                        },
-                    };
-
-                    tracing::debug!(event = tracing::field::debug(&event), "Request received");
-
-                    receive_request_tx
-                        .send((socket_addr, event))
-                        .unwrap();
-                }
-            });
-        }
+        tokio::spawn(
+            MasterServer::listen_for_disconnect_request_worker(
+                self.cancellation_token.clone(), 
+                connection_cancellation_token.clone(), 
+                self.please_disconnect_tx.subscribe(), 
+                socket_addr.clone()
+            )
+        );
 
         // Send response to worker
         let (out_stream_tx, out_stream_rx) = mpsc::channel::<Result<MasterPacket, Status>>(128);
@@ -96,7 +76,7 @@ impl proto::master_server::Master for MasterServer {
                 self.send_response_tx.subscribe(), 
                 out_stream_tx.clone(), 
                 self.cancellation_token.clone(), 
-                connected_cancellation_token, 
+                connection_cancellation_token, 
                 socket_addr.clone()
             )
         );
@@ -108,6 +88,63 @@ impl proto::master_server::Master for MasterServer {
 }
 
 impl MasterServer {
+    pub async fn listen_for_disconnect_request_worker(
+        global_cancellation_token: CancellationToken,
+        connected_cancellation_token: CancellationToken,
+        mut please_disconnect_rx: broadcast::Receiver<SocketAddr>,
+        socket_addr: SocketAddr
+    ) {
+        loop {
+            tokio::select! {
+                _ = connected_cancellation_token.cancelled() => break,
+                _ = global_cancellation_token.cancelled() => break,
+                Ok(requested_socket_addr) = please_disconnect_rx.recv() => if socket_addr == requested_socket_addr {
+                    tracing::debug!("Received please disconnect");
+                    connected_cancellation_token.cancel();
+                }
+            }
+        }
+    }
+
+    async fn receive_request_worker(
+        global_cancellation_token: CancellationToken, 
+        connection_cancellation_token: CancellationToken,
+        socket_addr: SocketAddr,
+        mut in_stream: Streaming<WorkerPacket>,
+        receive_request_tx: broadcast::Sender<(SocketAddr, WorkerPacket)>,
+        disconnected_tx: broadcast::Sender<SocketAddr>,
+    ) {
+        loop {
+            let maybe_event = tokio::select! {
+                maybe_event = in_stream.next() => maybe_event,
+                    _ = global_cancellation_token.cancelled() => {
+                    break
+                },
+            };
+
+            let event = match maybe_event {
+                Some(Ok(event)) => event,
+                Some(Err(e)) => {
+                    tracing::error!(
+                    "GRPC Error received from worker on address {socket_addr:?}: {e}"
+                );
+                    continue;
+                }
+                None => {
+                    disconnected_tx.send(socket_addr);
+                    connection_cancellation_token.cancel();
+                    break;
+                },
+            };
+
+            tracing::debug!(event = tracing::field::debug(&event), "Request received");
+
+            receive_request_tx
+                .send((socket_addr, event))
+                .unwrap();
+        }
+    }
+
     async fn send_response_worker(
         mut send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
         out_stream_tx: mpsc::Sender<Result<MasterPacket, Status>>,
@@ -178,6 +215,7 @@ async fn main() {
     let (disconnected_tx, disconnected_rx) = broadcast::channel(128);
     let (send_response_tx, send_response_rx) = broadcast::channel(128);
     let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
+    let (please_disconnect_tx, please_disconnect_rx) = broadcast::channel(128);
 
     let server = MasterServer {
         port: 50010,
@@ -187,13 +225,16 @@ async fn main() {
         receive_request_tx,
         connected_tx,
         disconnected_tx,
+        please_disconnect_tx: please_disconnect_tx.clone(),
+        please_disconnect_rx
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
+
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
-    let state = State::new();
+    let state = State::new(please_disconnect_tx.clone());
 
     let respond_on_commands_cancellation_token = cancellation_token.clone();
     let respond_on_commands_fut = start_respond_on_commands_worker(
@@ -201,6 +242,7 @@ async fn main() {
         respond_on_commands_cancellation_token,
         receive_request_rx,
         send_response_tx,
+        please_disconnect_tx
     );
 
     let connected_listener_fut = tokio::spawn(start_connected_listener(cancellation_token.clone(), state.clone(), connected_rx));
@@ -247,7 +289,7 @@ async fn start_disconnected_listener(
         };
 
         match event {
-            Ok(socket_addr) => state.remove_connected_worker(socket_addr).await,
+            Ok(socket_addr) => state.disconnect_the_worker(socket_addr).await,
             Err(e) => {
                 tracing::error!(context = "start_disconnected_listener", error = ?e, "recoverable error received")
             }
@@ -292,11 +334,18 @@ fn start_respond_on_commands_worker(
     cancellation_token: CancellationToken,
     receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
+    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let error_cancellation_token = cancellation_token.clone();
 
-        if let Err(error) = respond_on_commands(state, cancellation_token, receive_request_rx, send_response_tx).await {
+        if let Err(error) = respond_on_commands(
+            state, 
+            cancellation_token, 
+            receive_request_rx, 
+            send_response_tx, 
+            please_disconnect_tx
+        ).await {
             tracing::error!(error = ?error, "Failed to send request to socket handler to send a request with MasterPacket");
             error_cancellation_token.cancel();
         }
@@ -315,8 +364,8 @@ enum WorkerStatus {
     #[default]
     NotInitialized,
     Registered { name: String },
-    WaitingForWorkerToLoadModel { model: String },
-    WaitingForMasterToSendInput { loaded_model: String },
+    WaitingForWorkerToLoadModel { model: proto::ModelType },
+    ModelLoaded { loaded_model: proto::ModelType },
     GeneratingResponse { input: String },
 }
 
@@ -400,6 +449,8 @@ struct State {
     shape: std::sync::Arc<tokio::sync::Mutex<StateShape>>,
     change_signal_tx: broadcast::Sender<()>,
     change_signal_rx: broadcast::Receiver<()>,
+
+    please_disconnect_somebody_tx: broadcast::Sender<SocketAddr>,
 }
 
 impl Clone for State {
@@ -408,19 +459,26 @@ impl Clone for State {
             shape: self.shape.clone(),
             change_signal_tx: self.change_signal_tx.clone(),
             change_signal_rx: self.change_signal_tx.subscribe(),
+
+            please_disconnect_somebody_tx: self.please_disconnect_somebody_tx.clone(),
         }
     }
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(please_disconnect_somebody_tx: broadcast::Sender<SocketAddr>) -> Self {
         let (change_signal_tx, change_signal_rx) = broadcast::channel(128);
 
         Self {
             shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(change_signal_tx.clone()))),
             change_signal_rx,
-            change_signal_tx
+            change_signal_tx,
+            please_disconnect_somebody_tx
         }
+    }
+
+    pub async fn disconnect_the_worker(&self, socket_addr: SocketAddr) {
+        self.please_disconnect_somebody_tx.send(socket_addr);
     }
 
     pub async fn add_connected_worker(&self, socket_addr: SocketAddr) {
@@ -428,13 +486,6 @@ impl State {
         let shape = &mut *shape.lock().await;
 
         shape.add_connected_worker(socket_addr);
-    }
-
-    pub async fn remove_connected_worker(&self, socket_addr: SocketAddr) {
-        let shape = self.shape.clone();
-        let shape = &mut *shape.lock().await;
-
-        shape.remove_connected_worker(socket_addr);
     }
 
     pub async fn add_worker_name_to_socket_addr_mapping(&self, socket_addr: SocketAddr, worker_name: impl Into<String>) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
@@ -474,6 +525,19 @@ impl State {
             }
         }
     }
+
+    pub async fn get_worker_state_by_socket_addr(&self, socket_addr: &SocketAddr) -> Result<WorkerStatus, WorkerWithGivenSocketAddressDoesNotExist> {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        Ok(
+            shape.workers.iter()
+                .find(|worker| worker.address == *socket_addr)
+                .ok_or(WorkerWithGivenSocketAddressDoesNotExist { socket_addr: socket_addr.clone() })?
+                .status
+                .clone()
+        )
+    }
 }
 
 async fn respond_on_commands(
@@ -481,6 +545,7 @@ async fn respond_on_commands(
     cancellation_token: CancellationToken,
     mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
+    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>,
 ) -> Result<(), RespondOnHelloCommandError> {
     loop {
         let request = tokio::select! {
