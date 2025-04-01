@@ -10,10 +10,10 @@ message MasterPacket {
   oneof msg {
     MasterError error = 1;
 
+    uint32 hello_command_ok = 10; // uint32 is only a placeholder, the value does not matter
+
     LoadCommand load_command = 11;
     GenerateCommand generate_command = 12;
-
-    HelloCommandResponse hello_command_response = 13;
   }
 }
 
@@ -25,14 +25,6 @@ message MasterError {
     // Hello command
     string worker_with_given_name_already_exists = 10;
     string you_already_have_a_name_error = 11;
-  }
-}
-
-// HelloCommandResponse
-message HelloCommandResponse {
-  oneof result {
-    string ok = 1;
-    MasterError error = 2;
   }
 }
 

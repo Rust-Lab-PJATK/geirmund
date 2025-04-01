@@ -23,6 +23,7 @@ pub struct WorkerAutomata {
 #[derive(Debug, Clone, Copy)]
 pub enum WorkerAutomataState {
     WaitingForHelloCommand,
+    WaitingToSendLoadCommand,
     WaitingForLoadCommandResponse,
     WaitingForGenerateCommandResponse,
 }
@@ -76,9 +77,14 @@ impl WorkerAutomata {
                             tracing::error!("Received recoverable error from receive_worker_packets_channel: {e}");
                         }
                     }
-                }
+                },
+                _ = self.change_state_channel.receiver().recv() => self.react_to_change_of_state(),
             }
         }
+    }
+
+    async fn react_to_change_of_state(&mut self) {
+        todo!()
     }
 
     async fn react_to_new_worker_packet(&mut self, worker_packet: proto::WorkerPacket) {
@@ -139,14 +145,11 @@ impl WorkerAutomata {
             .get_worker_name_by_socket_addr(&self.socket_addr)
             .await
         {
-            self.send_master_packets_channel
-                .sender()
-                .send(
-                    protobuf::master::HelloCommandResponse::you_already_have_a_name_error(
-                        current_name.clone(),
-                    ),
-                )
-                .unwrap();
+            self.send_error(proto::master_error::Msg::YouAlreadyHaveANameError(format!(
+                "You already have a name assigned: {current_name}!"
+            )));
+
+            self.change_state(WorkerAutomataState::WaitingForHelloCommand);
 
             tracing::event!(Level::ERROR, current_name = %current_name, requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
         } else if self
@@ -155,14 +158,14 @@ impl WorkerAutomata {
             .await
             .is_some()
         {
-            self.send_master_packets_channel
-                .sender()
-                .send(
-                    protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(
-                        hello_command.name.clone(),
-                    ),
-                )
-                .unwrap();
+            self.send_error(proto::master_error::Msg::WorkerWithGivenNameAlreadyExists(
+                format!(
+                    "Worker with name {} already exists! Choose something else.",
+                    hello_command.name
+                ),
+            ));
+
+            self.change_state(WorkerAutomataState::WaitingForHelloCommand);
 
             tracing::event!(Level::ERROR, socket_addr = ?self.socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
         } else {
@@ -173,8 +176,10 @@ impl WorkerAutomata {
 
             self.send_master_packets_channel
                 .sender()
-                .send(protobuf::master::HelloCommandResponse::ok(name.clone()))
+                .send(protobuf::master::hello_command_ok())
                 .unwrap();
+
+            self.change_state(WorkerAutomataState::WaitingToSendLoadCommand);
 
             tracing::event!(Level::INFO, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him.");
         }
