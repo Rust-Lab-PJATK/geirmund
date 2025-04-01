@@ -8,10 +8,23 @@ service Master {
 
 message MasterPacket {
   oneof msg {
-    LoadCommand load_command = 1;
-    GenerateCommand generate_command = 2;
+    MasterError error = 1;
 
-    HelloCommandResponse hello_command_response = 3;
+    LoadCommand load_command = 11;
+    GenerateCommand generate_command = 12;
+
+    HelloCommandResponse hello_command_response = 13;
+  }
+}
+
+message MasterError {
+  oneof msg {
+    // General errors
+    string unexpected_packet_received = 1;
+
+    // Hello command
+    string worker_with_given_name_already_exists = 10;
+    string you_already_have_a_name_error = 11;
   }
 }
 
@@ -19,23 +32,8 @@ message MasterPacket {
 message HelloCommandResponse {
   oneof result {
     string ok = 1;
-    HelloCommandResponseError error = 2;
+    MasterError error = 2;
   }
-}
-
-message HelloCommandResponseError {
-  oneof variant {
-    WorkerWithGivenNameAlreadyExistsError worker_with_given_name_already_exists = 1;
-    YouAlreadyHaveANameError you_already_have_a_name = 2;
-  }
-}
-
-message WorkerWithGivenNameAlreadyExistsError {
-  string name = 1;
-}
-
-message YouAlreadyHaveANameError {
-  string name = 1;
 }
 
 // LoadCommand
