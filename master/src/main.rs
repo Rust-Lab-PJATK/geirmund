@@ -1,6 +1,6 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
-use std::{collections::HashMap, net::{SocketAddr, ToSocketAddrs}, pin::Pin, sync::Arc};
+use std::{net::{SocketAddr, ToSocketAddrs}, pin::Pin, sync::Arc};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
@@ -16,12 +16,12 @@ pub struct MasterServer {
     port: u16,
     cancellation_token: CancellationToken,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-    send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
+    _send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
     receive_request_tx: broadcast::Sender<(core::net::SocketAddr, WorkerPacket)>,
     connected_tx: broadcast::Sender<SocketAddr>,
     disconnected_tx: broadcast::Sender<SocketAddr>,
     please_disconnect_tx: broadcast::Sender<SocketAddr>,
-    please_disconnect_rx: broadcast::Receiver<SocketAddr>,
+    _please_disconnect_rx: broadcast::Receiver<SocketAddr>,
 }
 
 #[tonic::async_trait]
@@ -41,14 +41,15 @@ impl proto::master_server::Master for MasterServer {
 
         tracing::info!("new worker connection from address: {socket_addr}");
 
-        self.connected_tx.send(socket_addr);
+        // if this shows an error, it's better to panic tbh
+        self.connected_tx.send(socket_addr).unwrap();
 
         // When client disconnects we need to send cancellation to the tokio worker
         // that sends responses to the worker.
         let connection_cancellation_token = CancellationToken::new();
 
         // Receive request from worker
-        let mut in_stream = request.into_inner();
+        let in_stream = request.into_inner();
 
         tokio::spawn(MasterServer::receive_request_worker(
             self.cancellation_token.clone(),
@@ -221,12 +222,12 @@ async fn main() {
         port: 50010,
         cancellation_token: cancellation_token.clone(),
         send_response_tx: send_response_tx.clone(),
-        send_response_rx,
+        _send_response_rx: send_response_rx,
         receive_request_tx,
         connected_tx,
         disconnected_tx,
         please_disconnect_tx: please_disconnect_tx.clone(),
-        please_disconnect_rx
+        _please_disconnect_rx: please_disconnect_rx
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
