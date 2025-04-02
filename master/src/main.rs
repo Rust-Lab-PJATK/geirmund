@@ -1,6 +1,10 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
-use std::{net::{SocketAddr, ToSocketAddrs}, pin::Pin, sync::Arc};
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    pin::Pin,
+    sync::Arc,
+};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
@@ -93,30 +97,26 @@ impl proto::master_server::Master for MasterServer {
             socket_addr.clone(),
             in_stream,
             self.receive_request_tx.clone(),
-            self.disconnected_tx.clone()
+            self.disconnected_tx.clone(),
         ));
 
-        tokio::spawn(
-            MasterServer::listen_for_disconnect_request_worker(
-                self.cancellation_token.clone(), 
-                connection_cancellation_token.clone(), 
-                self.please_disconnect_tx.subscribe(), 
-                socket_addr.clone()
-            )
-        );
+        tokio::spawn(MasterServer::listen_for_disconnect_request_worker(
+            self.cancellation_token.clone(),
+            connection_cancellation_token.clone(),
+            self.please_disconnect_tx.subscribe(),
+            socket_addr.clone(),
+        ));
 
         // Send response to worker
         let (out_stream_tx, out_stream_rx) = mpsc::channel::<Result<MasterPacket, Status>>(128);
 
-        tokio::spawn(
-            MasterServer::send_response_worker(
-                self.send_response_tx.subscribe(), 
-                out_stream_tx.clone(), 
-                self.cancellation_token.clone(), 
-                connection_cancellation_token, 
-                socket_addr.clone()
-            )
-        );
+        tokio::spawn(MasterServer::send_response_worker(
+            self.send_response_tx.subscribe(),
+            out_stream_tx.clone(),
+            self.cancellation_token.clone(),
+            connection_cancellation_token,
+            socket_addr.clone(),
+        ));
 
         let out_stream = ReceiverStream::new(out_stream_rx);
 
@@ -129,7 +129,7 @@ impl MasterServer {
         global_cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
         mut please_disconnect_rx: broadcast::Receiver<SocketAddr>,
-        socket_addr: SocketAddr
+        socket_addr: SocketAddr,
     ) {
         loop {
             tokio::select! {
@@ -144,7 +144,7 @@ impl MasterServer {
     }
 
     async fn receive_request_worker(
-        global_cancellation_token: CancellationToken, 
+        global_cancellation_token: CancellationToken,
         connection_cancellation_token: CancellationToken,
         socket_addr: SocketAddr,
         mut in_stream: Streaming<WorkerPacket>,
@@ -163,22 +163,20 @@ impl MasterServer {
                 Some(Ok(event)) => event,
                 Some(Err(e)) => {
                     tracing::error!(
-                    "GRPC Error received from worker on address {socket_addr:?}: {e}"
-                );
+                        "GRPC Error received from worker on address {socket_addr:?}: {e}"
+                    );
                     continue;
                 }
                 None => {
                     disconnected_tx.send(socket_addr);
                     connection_cancellation_token.cancel();
                     break;
-                },
+                }
             };
 
             tracing::debug!(event = tracing::field::debug(&event), "Request received");
 
-            receive_request_tx
-                .send((socket_addr, event))
-                .unwrap();
+            receive_request_tx.send((socket_addr, event)).unwrap();
         }
     }
 
@@ -187,7 +185,7 @@ impl MasterServer {
         out_stream_tx: mpsc::Sender<Result<MasterPacket, Status>>,
         cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
-        socket_addr: SocketAddr
+        socket_addr: SocketAddr,
     ) {
         loop {
             let (event_socket_addr, event_data) = tokio::select! {
@@ -263,11 +261,10 @@ async fn main() {
         connected_tx,
         disconnected_tx,
         please_disconnect_tx: please_disconnect_tx.clone(),
-        _please_disconnect_rx: please_disconnect_rx
+        _please_disconnect_rx: please_disconnect_rx,
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
-
 
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
@@ -279,14 +276,31 @@ async fn main() {
         respond_on_commands_cancellation_token,
         receive_request_rx,
         send_response_tx,
-        please_disconnect_tx
+        please_disconnect_tx,
     );
 
-    let connected_listener_fut = tokio::spawn(start_connected_listener(cancellation_token.clone(), state.clone(), connected_rx));
-    let disconnected_listener_fut = tokio::spawn(start_disconnected_listener(cancellation_token.clone(), state, disconnected_rx));
+    let connected_listener_fut = tokio::spawn(start_connected_listener(
+        cancellation_token.clone(),
+        state.clone(),
+        connected_rx,
+    ));
+    let disconnected_listener_fut = tokio::spawn(start_disconnected_listener(
+        cancellation_token.clone(),
+        state,
+        disconnected_rx,
+    ));
 
-    let (grpc_server_result, respond_on_commands_result, connected_listener_result, disconnected_listener_result) =
-        tokio::join!(grpc_server_fut, respond_on_commands_fut, connected_listener_fut, disconnected_listener_fut);
+    let (
+        grpc_server_result,
+        respond_on_commands_result,
+        connected_listener_result,
+        disconnected_listener_result,
+    ) = tokio::join!(
+        grpc_server_fut,
+        respond_on_commands_fut,
+        connected_listener_fut,
+        disconnected_listener_fut
+    );
 
     grpc_server_result.unwrap().unwrap().unwrap();
     respond_on_commands_result.unwrap();
@@ -295,9 +309,9 @@ async fn main() {
 }
 
 async fn start_connected_listener(
-    cancellation_token: CancellationToken, 
-    state: State, 
-    mut connected_rx: broadcast::Receiver<SocketAddr>
+    cancellation_token: CancellationToken,
+    state: State,
+    mut connected_rx: broadcast::Receiver<SocketAddr>,
 ) {
     loop {
         let event = tokio::select! {
@@ -315,9 +329,9 @@ async fn start_connected_listener(
 }
 
 async fn start_disconnected_listener(
-    cancellation_token: CancellationToken, 
-    state: State, 
-    mut disconnected_rx: broadcast::Receiver<SocketAddr>
+    cancellation_token: CancellationToken,
+    state: State,
+    mut disconnected_rx: broadcast::Receiver<SocketAddr>,
 ) {
     loop {
         let event = tokio::select! {
@@ -355,7 +369,13 @@ async fn start_grpc_listener(
                 Server::builder()
                     .add_service(reflection_service)
                     .add_service(proto::master_server::MasterServer::new(server))
-                    .serve(format!("0.0.0.0:{}", server_port).to_socket_addrs().unwrap().next().unwrap())
+                    .serve(
+                        format!("0.0.0.0:{}", server_port)
+                            .to_socket_addrs()
+                            .unwrap()
+                            .next()
+                            .unwrap(),
+                    )
                     .await
             })
             .await
@@ -371,18 +391,20 @@ fn start_respond_on_commands_worker(
     cancellation_token: CancellationToken,
     receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
     send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>
+    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let error_cancellation_token = cancellation_token.clone();
 
         if let Err(error) = respond_on_commands(
-            state, 
-            cancellation_token, 
-            receive_request_rx, 
-            send_response_tx, 
-            please_disconnect_tx
-        ).await {
+            state,
+            cancellation_token,
+            receive_request_rx,
+            send_response_tx,
+            please_disconnect_tx,
+        )
+        .await
+        {
             tracing::error!(error = ?error, "Failed to send request to socket handler to send a request with MasterPacket");
             error_cancellation_token.cancel();
         }
@@ -400,10 +422,18 @@ struct WorkerState {
 enum WorkerStatus {
     #[default]
     NotInitialized,
-    Registered { name: String },
-    WaitingForWorkerToLoadModel { model: proto::ModelType },
-    ModelLoaded { loaded_model: proto::ModelType },
-    GeneratingResponse { input: String },
+    Registered {
+        name: String,
+    },
+    WaitingForWorkerToLoadModel {
+        model: proto::ModelType,
+    },
+    ModelLoaded {
+        loaded_model: proto::ModelType,
+    },
+    GeneratingResponse {
+        input: String,
+    },
 }
 
 struct StateShape {
@@ -413,7 +443,9 @@ struct StateShape {
 
 #[derive(thiserror::Error, Debug)]
 #[error("worker with given socket address {socket_addr}, does not exist")]
-struct WorkerWithGivenSocketAddressDoesNotExist { socket_addr: SocketAddr }
+struct WorkerWithGivenSocketAddressDoesNotExist {
+    socket_addr: SocketAddr,
+}
 
 impl StateShape {
     pub fn new(change_signal_tx: broadcast::Sender<()>) -> Self {
@@ -433,24 +465,36 @@ impl StateShape {
         self.change_signal_tx.send(());
     }
 
-    pub fn remove_connected_worker(&mut self, socket_addr: SocketAddr) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
-        let position = self.workers.iter().position(|worker| worker.address == socket_addr);
+    pub fn remove_connected_worker(
+        &mut self,
+        socket_addr: SocketAddr,
+    ) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
+        let position = self
+            .workers
+            .iter()
+            .position(|worker| worker.address == socket_addr);
 
         if let Some(position) = position {
             self.workers.remove(position);
             self.change_signal_tx.send(());
-            
+
             Ok(())
         } else {
             Err(WorkerWithGivenSocketAddressDoesNotExist { socket_addr })
         }
-
     }
 
-    pub fn assign_worker_a_name(&mut self, socket_addr: SocketAddr, worker_name: impl Into<String>) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
+    pub fn assign_worker_a_name(
+        &mut self,
+        socket_addr: SocketAddr,
+        worker_name: impl Into<String>,
+    ) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
         let worker_name = worker_name.into();
 
-        let mut position = self.workers.iter().position(|worker| worker.address == socket_addr)
+        let mut position = self
+            .workers
+            .iter()
+            .position(|worker| worker.address == socket_addr)
             .ok_or(WorkerWithGivenSocketAddressDoesNotExist { socket_addr })?
             .clone();
 
@@ -466,14 +510,22 @@ impl StateShape {
     }
 
     pub fn get_worker_name_by_socket_addr(&self, socket_addr: &SocketAddr) -> &Option<String> {
-        match self.workers.iter().find(|value| value.address == *socket_addr).map(|value| &value.name) {
+        match self
+            .workers
+            .iter()
+            .find(|value| value.address == *socket_addr)
+            .map(|value| &value.name)
+        {
             Some(worker_state) => worker_state,
             None => &None,
         }
     }
 
     pub fn get_socket_addr_by_worker_name(&self, worker_name: String) -> Option<&SocketAddr> {
-        let position = self.workers.iter().position(|worker| worker.name.as_ref() == Some(&worker_name));
+        let position = self
+            .workers
+            .iter()
+            .position(|worker| worker.name.as_ref() == Some(&worker_name));
 
         match position {
             Some(nth) => Some(&self.workers[nth].address),
@@ -507,10 +559,12 @@ impl State {
         let (change_signal_tx, change_signal_rx) = broadcast::channel(128);
 
         Self {
-            shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(change_signal_tx.clone()))),
+            shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(
+                change_signal_tx.clone(),
+            ))),
             change_signal_rx,
             change_signal_tx,
-            please_disconnect_somebody_tx
+            please_disconnect_somebody_tx,
         }
     }
 
@@ -525,7 +579,11 @@ impl State {
         shape.add_connected_worker(socket_addr);
     }
 
-    pub async fn add_worker_name_to_socket_addr_mapping(&self, socket_addr: SocketAddr, worker_name: impl Into<String>) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
+    pub async fn add_worker_name_to_socket_addr_mapping(
+        &self,
+        socket_addr: SocketAddr,
+        worker_name: impl Into<String>,
+    ) -> Result<(), WorkerWithGivenSocketAddressDoesNotExist> {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
@@ -563,17 +621,22 @@ impl State {
         }
     }
 
-    pub async fn get_worker_state_by_socket_addr(&self, socket_addr: &SocketAddr) -> Result<WorkerStatus, WorkerWithGivenSocketAddressDoesNotExist> {
+    pub async fn get_worker_state_by_socket_addr(
+        &self,
+        socket_addr: &SocketAddr,
+    ) -> Result<WorkerStatus, WorkerWithGivenSocketAddressDoesNotExist> {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
-        Ok(
-            shape.workers.iter()
-                .find(|worker| worker.address == *socket_addr)
-                .ok_or(WorkerWithGivenSocketAddressDoesNotExist { socket_addr: socket_addr.clone() })?
-                .status
-                .clone()
-        )
+        Ok(shape
+            .workers
+            .iter()
+            .find(|worker| worker.address == *socket_addr)
+            .ok_or(WorkerWithGivenSocketAddressDoesNotExist {
+                socket_addr: socket_addr.clone(),
+            })?
+            .status
+            .clone())
     }
 }
 
@@ -601,8 +664,15 @@ async fn respond_on_commands(
         match request.1 {
             WorkerPacket {
                 msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-            } => 
-                respond_on_hello_command(state.clone(), socket_addr, hello_command, send_response_tx.clone()).await?,
+            } => {
+                respond_on_hello_command(
+                    state.clone(),
+                    socket_addr,
+                    hello_command,
+                    send_response_tx.clone(),
+                )
+                .await?
+            }
             _ => unimplemented!(),
         }
     }
@@ -617,12 +687,12 @@ enum RespondOnHelloCommandError {
     WorkerWithGivenSocketAddrDoesNotExist(#[from] WorkerWithGivenSocketAddressDoesNotExist),
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
     use futures::StreamExt;
+    use proto::worker_packet::Msg as WorkerPacketMsg;
     use proto::{master_client::MasterClient, HelloCommand, MasterPacket, WorkerPacket};
     use tokio::{
         sync::{broadcast, mpsc},
@@ -631,9 +701,10 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_util::sync::CancellationToken;
     use tonic::transport::Channel;
-    use proto::worker_packet::Msg as WorkerPacketMsg;
 
-    use crate::{protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer, State};
+    use crate::{
+        protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer, State,
+    };
 
     struct MasterTesting {
         server_port: u16,
@@ -641,7 +712,7 @@ mod tests {
         grpc_fut: JoinHandle<Option<Result<(), tonic::transport::Error>>>,
         respond_to_commands_fut: JoinHandle<()>,
         receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-        clients: HashMap<i32, MasterTestingClient>
+        clients: HashMap<i32, MasterTestingClient>,
     }
 
     impl MasterTesting {
@@ -680,21 +751,25 @@ mod tests {
             }
         }
 
-        pub async fn connect_new_client(mut self, id: i32) -> Self{
+        pub async fn connect_new_client(mut self, id: i32) -> Self {
             if self.clients.contains_key(&id) {
                 panic!("Client with id {id} is already connected.");
             }
 
-            self.clients.insert(id, MasterTestingClient::new(self.cancellation_token.clone(), self.server_port).await);
+            self.clients.insert(
+                id,
+                MasterTestingClient::new(self.cancellation_token.clone(), self.server_port).await,
+            );
 
             self
         }
 
-        pub async fn send_packet_to_master(mut self, client_id: i32, packet: proto::WorkerPacket) -> Self {
-            let client = self.clients.remove(&client_id)
-                .unwrap()
-                .send(packet)
-                .await;
+        pub async fn send_packet_to_master(
+            mut self,
+            client_id: i32,
+            packet: proto::WorkerPacket,
+        ) -> Self {
+            let client = self.clients.remove(&client_id).unwrap().send(packet).await;
 
             self.clients.insert(client_id, client);
 
@@ -733,31 +808,52 @@ mod tests {
             results.1.unwrap();
         }
 
-        pub async fn assert_if_identical_packet_has_been_received_on_worker(mut self, client_id: i32, packet: MasterPacket) -> Self {
-            let client = self.clients.remove(&client_id).unwrap().assert_packet_received(packet).await;
+        pub async fn assert_if_identical_packet_has_been_received_on_worker(
+            mut self,
+            client_id: i32,
+            packet: MasterPacket,
+        ) -> Self {
+            let client = self
+                .clients
+                .remove(&client_id)
+                .unwrap()
+                .assert_packet_received(packet)
+                .await;
             self.clients.insert(client_id, client);
 
             self
         }
-
 
         pub async fn assert_no_more_packets_received_on_worker(mut self, client_id: i32) -> Self {
-            let client = self.clients.remove(&client_id).unwrap().assert_no_packets_received().await;
+            let client = self
+                .clients
+                .remove(&client_id)
+                .unwrap()
+                .assert_no_packets_received()
+                .await;
             self.clients.insert(client_id, client);
 
             self
         }
 
-        pub async fn connect_worker_and_register_it(mut self, client_id: i32, name: impl Into<String>) -> Self {
+        pub async fn connect_worker_and_register_it(
+            mut self,
+            client_id: i32,
+            name: impl Into<String>,
+        ) -> Self {
             let name = name.into();
 
             let request_packet = protobuf::worker::HelloCommand::new(name.clone());
             let response_packet = protobuf::master::HelloCommandResponse::ok(name);
 
-            self.connect_new_client(client_id).await
-                .send_packet_to_master(client_id, request_packet.clone()).await
-                .assert_if_identical_packet_has_been_received_on_master(request_packet).await
-                .assert_if_identical_packet_has_been_received_on_worker(client_id, response_packet).await
+            self.connect_new_client(client_id)
+                .await
+                .send_packet_to_master(client_id, request_packet.clone())
+                .await
+                .assert_if_identical_packet_has_been_received_on_master(request_packet)
+                .await
+                .assert_if_identical_packet_has_been_received_on_worker(client_id, response_packet)
+                .await
         }
     }
 
@@ -774,9 +870,10 @@ mod tests {
 
             // set up stub worker
 
-            let mut client = proto::master_client::MasterClient::connect(format!("http://127.0.0.1:{}", port))
-                .await
-                .unwrap();
+            let mut client =
+                proto::master_client::MasterClient::connect(format!("http://127.0.0.1:{}", port))
+                    .await
+                    .unwrap();
 
             let response = client
                 .stream(ReceiverStream::new(send_request_rx))
@@ -799,13 +896,12 @@ mod tests {
                             // We do a paic here, because it's testing and the errors for our app
                             // should be self-contained in protobuf types
                             panic!("Received GRPC error from master, error: {e:?}");
-                        },
+                        }
                         // connection between the worker and master has probably ended
                         None => break,
                     };
 
                     receive_response_tx.send(message).await.unwrap();
-
                 }
             });
 
@@ -814,7 +910,7 @@ mod tests {
                 send_request_tx,
                 receive_response_rx,
             }
-       }
+        }
 
         pub async fn send(self, packet: WorkerPacket) -> Self {
             self.send_request_tx.send(packet).await.unwrap();
@@ -822,7 +918,7 @@ mod tests {
             self
         }
 
-        pub async fn assert_packet_received(mut self, packet: MasterPacket) -> Self{
+        pub async fn assert_packet_received(mut self, packet: MasterPacket) -> Self {
             let event = tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     assert!(false, "Time exceeded.");
@@ -839,9 +935,11 @@ mod tests {
             self
         }
 
-        pub async fn assert_no_packets_received(mut self) -> Self{
+        pub async fn assert_no_packets_received(mut self) -> Self {
             match self.receive_response_rx.try_recv() {
-                Ok(packet) => panic!("Expected no packets to be received, but received a {packet:?} instead."),
+                Ok(packet) => {
+                    panic!("Expected no packets to be received, but received a {packet:?} instead.")
+                }
                 Err(mpsc::error::TryRecvError::Empty) => self,
                 Err(mpsc::error::TryRecvError::Disconnected) => self,
             }
@@ -851,7 +949,9 @@ mod tests {
     #[tokio::test]
     pub async fn test_receives_hello_command() {
         let packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("helloworld") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("helloworld"),
+            })),
         };
 
         MasterTesting::new()
@@ -869,7 +969,9 @@ mod tests {
     #[tokio::test]
     pub async fn test_if_you_already_have_a_name_error_handler_works_on_same_name() {
         let packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("helloworld") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("helloworld"),
+            })),
         };
 
         MasterTesting::new()
@@ -880,26 +982,38 @@ mod tests {
             .await
             .assert_if_identical_packet_has_been_received_on_master(packet.clone())
             .await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("helloworld".to_string()))
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::ok("helloworld".to_string()),
+            )
             .await
             .send_packet_to_master(1, packet.clone())
             .await
             .assert_if_identical_packet_has_been_received_on_master(packet.clone())
             .await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::you_already_have_a_name_error("helloworld".to_string()))
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::you_already_have_a_name_error(
+                    "helloworld".to_string(),
+                ),
+            )
             .await
             .cancel()
-        .await;
+            .await;
     }
 
     #[tokio::test]
     pub async fn test_if_you_already_have_a_name_error_handler_works_on_different_name() {
         let first_packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("first_worker") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("first_worker"),
+            })),
         };
 
         let second_packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("second_worker") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("second_worker"),
+            })),
         };
 
         MasterTesting::new()
@@ -910,37 +1024,59 @@ mod tests {
             .await
             .assert_if_identical_packet_has_been_received_on_master(first_packet.clone())
             .await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("first_worker".to_string()))
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::ok("first_worker".to_string()),
+            )
             .await
             .send_packet_to_master(1, second_packet.clone())
             .await
             .assert_if_identical_packet_has_been_received_on_master(second_packet.clone())
             .await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::you_already_have_a_name_error("first_worker".to_string()))
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::you_already_have_a_name_error(
+                    "first_worker".to_string(),
+                ),
+            )
             .await
             .cancel()
-        .await;
+            .await;
     }
 
     #[tokio::test]
     pub async fn test_if_worker_with_given_name_already_exists_handler_works() {
         let packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("first_worker") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("first_worker"),
+            })),
         };
 
         MasterTesting::new()
             .await
-            .connect_new_client(1).await
-            .connect_new_client(2).await
-            .send_packet_to_master(1, packet.clone()).await
-            .assert_if_identical_packet_has_been_received_on_master(packet.clone()).await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("first_worker".to_string()))
+            .connect_new_client(1)
+            .await
+            .connect_new_client(2)
+            .await
+            .send_packet_to_master(1, packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::ok("first_worker".to_string()),
+            )
             .await
             .send_packet_to_master(2, packet.clone())
             .await
             .assert_if_identical_packet_has_been_received_on_master(packet.clone())
             .await
-            .assert_if_identical_packet_has_been_received_on_worker(2, protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists("first_worker".to_string()))
+            .assert_if_identical_packet_has_been_received_on_worker(
+                2,
+                protobuf::master::HelloCommandResponse::worker_with_given_name_already_exists(
+                    "first_worker".to_string(),
+                ),
+            )
             .await
             .cancel()
             .await;
@@ -949,23 +1085,40 @@ mod tests {
     #[tokio::test]
     pub async fn test_if_master_server_can_register_two_workers() {
         let first_packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("first_worker") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("first_worker"),
+            })),
         };
 
         let second_packet = WorkerPacket {
-            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand { name: String::from("second_worker") }))
+            msg: Some(WorkerPacketMsg::HelloCommand(HelloCommand {
+                name: String::from("second_worker"),
+            })),
         };
 
         MasterTesting::new()
             .await
-            .connect_new_client(1).await
-            .connect_new_client(2).await
-            .send_packet_to_master(1, first_packet.clone()).await
-            .send_packet_to_master(2, second_packet.clone()).await
-            .assert_if_identical_packet_has_been_received_on_master(first_packet.clone()).await
-            .assert_if_identical_packet_has_been_received_on_worker(1, protobuf::master::HelloCommandResponse::ok("first_worker".to_string())).await
-            .assert_if_identical_packet_has_been_received_on_master(second_packet.clone()).await
-            .assert_if_identical_packet_has_been_received_on_worker(2, protobuf::master::HelloCommandResponse::ok("second_worker".to_string()))
+            .connect_new_client(1)
+            .await
+            .connect_new_client(2)
+            .await
+            .send_packet_to_master(1, first_packet.clone())
+            .await
+            .send_packet_to_master(2, second_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(first_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(
+                1,
+                protobuf::master::HelloCommandResponse::ok("first_worker".to_string()),
+            )
+            .await
+            .assert_if_identical_packet_has_been_received_on_master(second_packet.clone())
+            .await
+            .assert_if_identical_packet_has_been_received_on_worker(
+                2,
+                protobuf::master::HelloCommandResponse::ok("second_worker".to_string()),
+            )
             .await
             .cancel()
             .await;

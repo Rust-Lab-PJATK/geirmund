@@ -20,9 +20,9 @@ pub mod worker {
     impl HelloCommand {
         pub fn new(name: String) -> proto::WorkerPacket {
             proto::WorkerPacket {
-                msg: Some(proto::worker_packet::Msg::HelloCommand(proto::HelloCommand {
-                    name,
-                }))
+                msg: Some(proto::worker_packet::Msg::HelloCommand(
+                    proto::HelloCommand { name },
+                )),
             }
         }
     }
