@@ -78,13 +78,25 @@ impl WorkerAutomata {
                         }
                     }
                 },
-                _ = self.change_state_channel.receiver().recv() => self.react_to_change_of_state(),
+                _ = self.change_state_channel.receiver().recv() => self.react_to_change_of_state().await,
             }
         }
     }
 
     async fn react_to_change_of_state(&mut self) {
-        todo!()
+        match self.automata_state {
+            WorkerAutomataState::WaitingToSendLoadCommand => {
+                tracing::event!(Level::DEBUG, "Sending load command to worker");
+
+                self.send_master_packets_channel
+                    .sender()
+                    .send(protobuf::master::load_command())
+                    .unwrap();
+
+                self.change_state(WorkerAutomataState::WaitingForLoadCommandResponse);
+            }
+            _ => {}
+        }
     }
 
     async fn react_to_new_worker_packet(&mut self, worker_packet: proto::WorkerPacket) {

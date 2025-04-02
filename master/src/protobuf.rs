@@ -4,6 +4,14 @@ pub mod master {
             msg: Some(proto::master_packet::Msg::HelloCommandOk(0)),
         }
     }
+
+    pub fn load_command() -> proto::MasterPacket {
+        proto::MasterPacket {
+            msg: Some(proto::master_packet::Msg::LoadCommand(
+                proto::ModelType::Llama3v21b.into(),
+            )),
+        }
+    }
 }
 
 pub mod worker {

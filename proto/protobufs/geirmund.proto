@@ -12,7 +12,7 @@ message MasterPacket {
 
     uint32 hello_command_ok = 10; // uint32 is only a placeholder, the value does not matter
 
-    LoadCommand load_command = 11;
+    ModelType load_command = 11;
     GenerateCommand generate_command = 12;
   }
 }
@@ -26,12 +26,6 @@ message MasterError {
     string worker_with_given_name_already_exists = 10;
     string you_already_have_a_name_error = 11;
   }
-}
-
-// LoadCommand
-message LoadCommand {
-  uint32 id = 1;
-  ModelType type = 2;
 }
 
 // GenerateCommand
