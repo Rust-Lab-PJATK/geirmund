@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::{hint::unreachable_unchecked, net::SocketAddr};
 
+use proto::ModelType;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 
@@ -20,11 +21,12 @@ pub struct WorkerAutomata {
     change_state_channel: Channel<WorkerAutomataState>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerAutomataState {
     WaitingForHelloCommand,
-    WaitingToSendLoadCommand,
-    WaitingForLoadCommandResponse,
+    WaitingToSendLoadCommand(proto::ModelType),
+    WaitingForLoadCommandResponse(proto::ModelType),
+    WaitingToSendGenerateCommand(String),
     WaitingForGenerateCommandResponse,
 }
 
@@ -85,15 +87,17 @@ impl WorkerAutomata {
 
     async fn react_to_change_of_state(&mut self) {
         match self.automata_state {
-            WorkerAutomataState::WaitingToSendLoadCommand => {
+            WorkerAutomataState::WaitingToSendLoadCommand(model) => {
                 tracing::event!(Level::DEBUG, "Sending load command to worker");
 
                 self.send_master_packets_channel
                     .sender()
-                    .send(protobuf::master::load_command())
+                    .send(protobuf::master::load_command(model))
                     .unwrap();
 
-                self.change_state(WorkerAutomataState::WaitingForLoadCommandResponse);
+                self.change_state(WorkerAutomataState::WaitingForLoadCommandResponse(
+                    model.into(),
+                ));
             }
             _ => {}
         }
@@ -104,28 +108,63 @@ impl WorkerAutomata {
 
         match self.automata_state {
             WorkerAutomataState::WaitingForHelloCommand => {
-                let hello_command = match worker_packet {
+                match worker_packet {
                     proto::WorkerPacket {
                         msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-                    } => hello_command,
-                    _ => {
-                        tracing::event!(Level::ERROR, ?worker_packet, "Received invalid packet, expected proto::HelloCommand. Sending error message and resetting state to WaitingForHelloCommand.");
-
-                        self.send_error(proto::master_error::Msg::UnexpectedPacketReceived(
-                            "Expected HelloCommand, resetting state to WaitingForHelloCommand."
-                                .to_string(),
-                        ));
-
-                        self.change_state(WorkerAutomataState::WaitingForHelloCommand);
-
-                        return;
-                    }
+                    } => self.react_to_hello_command(hello_command).await,
+                    _ => self.handle_invalid_packet(
+                        worker_packet,
+                        String::from("Received invalid packet, expected proto::HelloCommand. Sending error message and resetting state to WaitingForHelloCommand."),
+                        "Expected HelloCommand, resetting to WaitingForHelloCommand".to_string(),
+                        WorkerAutomataState::WaitingForHelloCommand,
+                    ).await
                 };
-
-                self.react_to_hello_command(hello_command).await;
             }
+            WorkerAutomataState::WaitingForLoadCommandResponse(model_type) => match worker_packet {
+                proto::WorkerPacket {
+                    msg: Some(proto::worker_packet::Msg::LoadCommandResponse(loaded_model)),
+                } => {
+                    let model_type_in_int: i32 = model_type.into();
+
+                    if let Some(loaded_model) = loaded_model.try_into().ok() {
+                        self.react_to_load_command_response(loaded_model).await
+                    } else {
+                        self.send_error(proto::master_error::Msg::WrongModelHasBeenLoaded(format!(
+                            "Wrong model has been loaded, expected {model_type_in_int} ({model_type:?}), received {loaded_model:?}",
+                        )));
+
+                        self.change_state(WorkerAutomataState::WaitingToSendLoadCommand(
+                            model_type,
+                        ));
+                    }
+                }
+                _ => {
+                    self.handle_invalid_packet(
+                        worker_packet,
+                        String::from("Received invalid packet, expected LoadCommandResponse. Sending error message and resetting state to WaitingToSendLoadCommand."),
+                        "Expected LoadCommandResponse, resetting to WaitingToSendLoadCommand".to_string(),
+                        WorkerAutomataState::WaitingToSendLoadCommand(model_type),
+                    ).await;
+                }
+            },
             _ => unimplemented!(),
         }
+    }
+
+    async fn handle_invalid_packet(
+        &mut self,
+        worker_packet: proto::WorkerPacket,
+        log_message: String,
+        error_packet_message: String,
+        change_state_to: WorkerAutomataState,
+    ) {
+        tracing::event!(Level::ERROR, ?worker_packet, "{}", log_message);
+
+        self.send_error(proto::master_error::Msg::UnexpectedPacketReceived(
+            error_packet_message,
+        ));
+
+        self.change_state(change_state_to);
     }
 
     async fn send_error(&mut self, error: proto::master_error::Msg) {
@@ -142,14 +181,24 @@ impl WorkerAutomata {
     }
 
     fn change_state(&mut self, state: WorkerAutomataState) {
-        self.automata_state = state;
-        self.change_state_channel.sender().send(state).unwrap();
+        self.automata_state = state.clone();
+        self.change_state_channel
+            .sender()
+            .send(state.clone())
+            .unwrap();
 
         tracing::event!(Level::DEBUG, ?state, "Change of state");
     }
 
     // react_to_new_worker_packet extensions
     async fn react_to_hello_command(&mut self, hello_command: proto::HelloCommand) {
+        assert!(
+            self.automata_state == WorkerAutomataState::WaitingForHelloCommand,
+            "Expected automata state to be {:?}, but it is {:?}",
+            WorkerAutomataState::WaitingForHelloCommand,
+            self.automata_state
+        );
+
         tracing::event!(Level::DEBUG, %hello_command.name, "Received hello command");
 
         if let Some(current_name) = self
@@ -191,9 +240,47 @@ impl WorkerAutomata {
                 .send(protobuf::master::hello_command_ok())
                 .unwrap();
 
-            self.change_state(WorkerAutomataState::WaitingToSendLoadCommand);
+            self.change_state(WorkerAutomataState::WaitingToSendLoadCommand(
+                proto::ModelType::Llama3v21b,
+            ));
 
             tracing::event!(Level::INFO, requested_name = ?name, "Worker requested to be registered as a new worker, we have accepted him.");
         }
+    }
+
+    async fn react_to_load_command_response(&mut self, loaded_model: proto::ModelType) {
+        assert!(
+            self.automata_state == WorkerAutomataState::WaitingForLoadCommandResponse(loaded_model),
+            "Expected automata state to be {:?}, but it is {:?}",
+            WorkerAutomataState::WaitingForLoadCommandResponse(loaded_model),
+            self.automata_state
+        );
+
+        tracing::event!(Level::DEBUG, ?loaded_model, "Received LoadCommandResponse");
+
+        let expected_model = if let WorkerAutomataState::WaitingForLoadCommandResponse(model_type) =
+            self.automata_state
+        {
+            model_type
+        } else {
+            unreachable!()
+        };
+
+        if expected_model != loaded_model {
+            self.send_error(proto::master_error::Msg::WrongModelHasBeenLoaded(format!(
+                "Expected to load {expected_model:?}, received {loaded_model:?}"
+            )));
+
+            self.change_state(WorkerAutomataState::WaitingToSendLoadCommand(
+                expected_model,
+            ));
+
+            return;
+        }
+
+        self.change_state(WorkerAutomataState::WaitingToSendGenerateCommand(
+            "Tell me something about Polish-Japanese Academy of Information Technology."
+                .to_string(),
+        ));
     }
 }

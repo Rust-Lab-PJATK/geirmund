@@ -1,15 +1,15 @@
 pub mod master {
+    use proto::ModelType;
+
     pub fn hello_command_ok() -> proto::MasterPacket {
         proto::MasterPacket {
             msg: Some(proto::master_packet::Msg::HelloCommandOk(0)),
         }
     }
 
-    pub fn load_command() -> proto::MasterPacket {
+    pub fn load_command(model: ModelType) -> proto::MasterPacket {
         proto::MasterPacket {
-            msg: Some(proto::master_packet::Msg::LoadCommand(
-                proto::ModelType::Llama3v21b.into(),
-            )),
+            msg: Some(proto::master_packet::Msg::LoadCommand(model.into())),
         }
     }
 }

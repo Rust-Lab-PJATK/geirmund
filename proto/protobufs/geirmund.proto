@@ -25,6 +25,9 @@ message MasterError {
     // Hello command
     string worker_with_given_name_already_exists = 10;
     string you_already_have_a_name_error = 11;
+
+    // Load command response
+    string wrong_model_has_been_loaded = 20;
   }
 }
 
@@ -41,9 +44,10 @@ enum ModelType {
 
 message WorkerPacket {
   oneof msg {
-    WorkerResult generate_response = 1;
-    WorkerResult load_response = 2;
-    HelloCommand hello_command = 3;
+    WorkerError error = 1;
+
+    HelloCommand hello_command = 10;
+    ModelType load_command_response = 11;
   }
 }
 
@@ -51,34 +55,12 @@ message HelloCommand {
   string name = 1;
 }
 
-message GenerateResponse {
-  uint32 id = 1;
-  string content = 2;
-}
-
-message LoadResponse {
-  uint32 id = 1;
-}
-
-message WorkerErrorWrapper {
+message WorkerError {
   oneof err {
-    WorkerErrorContent model_busy = 1;
-    WorkerErrorContent model_already_loaded = 2;
-    WorkerErrorContent model_not_loaded = 3;
-    WorkerErrorContent loading_error = 4;
-    WorkerErrorContent generation_error = 5;
-  }
-}
-
-message WorkerErrorContent {
-  uint32 id = 1;
-  string content = 2;
-}
-
-message WorkerResult {
-  oneof result {
-    GenerateResponse generate_response = 1;
-    LoadResponse load_response = 2;
-    WorkerErrorWrapper error = 3;
+    string model_busy = 1;
+    string model_already_loaded = 2;
+    string model_not_loaded = 3;
+    string loading_error = 4;
+    string generation_error = 5;
   }
 }
