@@ -42,7 +42,10 @@ message WorkerPacket {
     WorkerError error = 1;
 
     HelloCommand hello_command = 10;
-    ModelType load_command_response = 11;
+
+    ModelType load_command_response = 20;
+
+    string generate_command_response = 30;
   }
 }
 

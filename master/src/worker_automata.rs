@@ -27,7 +27,8 @@ pub enum WorkerAutomataState {
     WaitingToSendLoadCommand(proto::ModelType),
     WaitingForLoadCommandResponse(proto::ModelType),
     WaitingToSendGenerateCommand(String),
-    WaitingForGenerateCommandResponse,
+    WaitingForGenerateCommandResponse { previous_prompt: String },
+    End,
 }
 
 impl WorkerAutomata {
@@ -73,6 +74,11 @@ impl WorkerAutomata {
                     return;
                 },
                 maybe_worker_packet = self.receive_worker_packets_channel.receiver().recv() => {
+                    if matches!(self.automata_state, WorkerAutomataState::End) {
+                        self.disconnect_from_worker_channel.sender().send(());
+                        return;
+                    }
+
                     match maybe_worker_packet {
                         Ok(worker_packet) => self.react_to_new_worker_packet(worker_packet).await,
                         Err(e) => {
@@ -80,7 +86,14 @@ impl WorkerAutomata {
                         }
                     }
                 },
-                _ = self.change_state_channel.receiver().recv() => self.react_to_change_of_state().await,
+                _ = self.change_state_channel.receiver().recv() => {
+                    if matches!(self.automata_state, WorkerAutomataState::End) {
+                        self.disconnect_from_worker_channel.sender().send(());
+                        return;
+                    }
+
+                    self.react_to_change_of_state().await;
+                }
             }
         }
     }
@@ -104,10 +117,12 @@ impl WorkerAutomata {
 
                 self.send_master_packets_channel
                     .sender()
-                    .send(protobuf::master::generate_command(prompt))
+                    .send(protobuf::master::generate_command(prompt.clone()))
                     .unwrap();
 
-                self.change_state(WorkerAutomataState::WaitingForGenerateCommandResponse);
+                self.change_state(WorkerAutomataState::WaitingForGenerateCommandResponse {
+                    previous_prompt: prompt,
+                });
             }
             _ => {}
         }
@@ -116,7 +131,7 @@ impl WorkerAutomata {
     async fn react_to_new_worker_packet(&mut self, worker_packet: proto::WorkerPacket) {
         tracing::event!(Level::TRACE, ?worker_packet, "New worker packet received");
 
-        match self.automata_state {
+        match self.automata_state.clone() {
             WorkerAutomataState::WaitingForHelloCommand => {
                 match worker_packet {
                     proto::WorkerPacket {
@@ -157,6 +172,28 @@ impl WorkerAutomata {
                     ).await;
                 }
             },
+            WorkerAutomataState::WaitingForGenerateCommandResponse { previous_prompt } => {
+                match worker_packet {
+                    proto::WorkerPacket {
+                        msg: Some(proto::worker_packet::Msg::GenerateCommandResponse(response)),
+                    } => {
+                        self.disconnect_from_worker_channel
+                            .sender()
+                            .send(())
+                            .unwrap();
+
+                        tracing::event!(Level::INFO, "Received response from worker: {response}");
+                    }
+                    _ => {
+                        self.handle_invalid_packet(
+                        worker_packet,
+                        String::from("Received invalid packet, expected GenerateCommandResponse. Sending error message and resetting state to WaitingToSendGenerateCommand."),
+                        "Expected GenerateCommandResponse, resetting to WaitingToSendGenerateCommand".to_string(),
+                        WorkerAutomataState::WaitingToSendGenerateCommand(previous_prompt),
+                    ).await;
+                    }
+                }
+            }
             _ => unimplemented!(),
         }
     }
