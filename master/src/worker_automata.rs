@@ -1,6 +1,5 @@
-use std::{hint::unreachable_unchecked, net::SocketAddr};
+use std::net::SocketAddr;
 
-use proto::ModelType;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 
