@@ -12,6 +12,20 @@ pub mod master {
             msg: Some(proto::master_packet::Msg::LoadCommand(model.into())),
         }
     }
+
+    pub fn load_command_response_ack(model: ModelType) -> proto::MasterPacket {
+        proto::MasterPacket {
+            msg: Some(proto::master_packet::Msg::LoadCommandResponseAck(
+                model.into(),
+            )),
+        }
+    }
+
+    pub fn generate_command(prompt: String) -> proto::MasterPacket {
+        proto::MasterPacket {
+            msg: Some(proto::master_packet::Msg::GenerateCommand(prompt)),
+        }
+    }
 }
 
 pub mod worker {

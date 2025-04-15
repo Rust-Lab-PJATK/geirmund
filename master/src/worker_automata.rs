@@ -86,7 +86,7 @@ impl WorkerAutomata {
     }
 
     async fn react_to_change_of_state(&mut self) {
-        match self.automata_state {
+        match self.automata_state.clone() {
             WorkerAutomataState::WaitingToSendLoadCommand(model) => {
                 tracing::event!(Level::DEBUG, "Sending load command to worker");
 
@@ -98,6 +98,16 @@ impl WorkerAutomata {
                 self.change_state(WorkerAutomataState::WaitingForLoadCommandResponse(
                     model.into(),
                 ));
+            }
+            WorkerAutomataState::WaitingToSendGenerateCommand(prompt) => {
+                tracing::event!(Level::DEBUG, "Sending generate command to worker.");
+
+                self.send_master_packets_channel
+                    .sender()
+                    .send(protobuf::master::generate_command(prompt))
+                    .unwrap();
+
+                self.change_state(WorkerAutomataState::WaitingForGenerateCommandResponse);
             }
             _ => {}
         }
@@ -277,6 +287,11 @@ impl WorkerAutomata {
 
             return;
         }
+
+        self.send_master_packets_channel
+            .sender()
+            .send(protobuf::master::load_command_response_ack(expected_model))
+            .unwrap();
 
         self.change_state(WorkerAutomataState::WaitingToSendGenerateCommand(
             "Tell me something about Polish-Japanese Academy of Information Technology."

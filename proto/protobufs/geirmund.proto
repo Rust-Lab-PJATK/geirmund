@@ -13,7 +13,9 @@ message MasterPacket {
     uint32 hello_command_ok = 10; // uint32 is only a placeholder, the value does not matter
 
     ModelType load_command = 11;
-    GenerateCommand generate_command = 12;
+    ModelType load_command_response_ack = 12;
+
+    string generate_command = 13;
   }
 }
 
@@ -29,13 +31,6 @@ message MasterError {
     // Load command response
     string wrong_model_has_been_loaded = 20;
   }
-}
-
-// GenerateCommand
-message GenerateCommand {
-  uint32 id = 1;
-  ModelType type = 2;
-  string prompt = 3;
 }
 
 enum ModelType {
