@@ -1,5 +1,6 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
+use tracing::Level;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     pin::Pin,
@@ -253,9 +254,9 @@ async fn main() {
     let server = MasterServer {
         port: 50010,
         cancellation_token: cancellation_token.clone(),
-        connected_channel,
-        disconnected_channel,
-        please_disconnect_channel,
+        connected_channel: connected_channel.clone(),
+        disconnected_channel: disconnected_channel.clone(),
+        please_disconnect_channel: please_disconnect_channel.clone(),
         send_response_channel,
         receive_request_channel,
     };
@@ -265,6 +266,8 @@ async fn main() {
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
     let state = State::new();
+
+    state.start_watcher(cancellation_token, connected_channel, disconnected_channel, please_disconnect_channel);
 
     let (
         grpc_server_result,
@@ -503,50 +506,91 @@ impl StateShape {
 
 struct State {
     shape: std::sync::Arc<tokio::sync::Mutex<StateShape>>,
-    change_signal_tx: broadcast::Sender<()>,
-    change_signal_rx: broadcast::Receiver<()>,
-
-    please_disconnect_somebody_tx: broadcast::Sender<SocketAddr>,
+    change_signal: Channel<()>,
 }
 
 impl Clone for State {
     fn clone(&self) -> Self {
         Self {
             shape: self.shape.clone(),
-            change_signal_tx: self.change_signal_tx.clone(),
-            change_signal_rx: self.change_signal_tx.subscribe(),
-
-            please_disconnect_somebody_tx: self.please_disconnect_somebody_tx.clone(),
+            change_signal: self.change_signal.clone(),
         }
     }
 }
 
 impl State {
-    pub fn new(please_disconnect_somebody_tx: broadcast::Sender<SocketAddr>) -> Self {
-        let (change_signal_tx, change_signal_rx) = broadcast::channel(128);
+    pub async fn start_watcher(
+        &self,
+        cancellation_token: CancellationToken,
+        mut connected_channel: Channel<SocketAddr>,
+        mut disconnected_channel: Channel<SocketAddr>,
+        mut please_disconnect_channel: Channel<SocketAddr>,
+    ) {
+        let _span = tracing::span!(Level::TRACE, "state watcher");
+        _span.enter();
 
-        Self {
-            shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(
-                change_signal_tx.clone(),
-            ))),
-            change_signal_rx,
-            change_signal_tx,
-            please_disconnect_somebody_tx,
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    tracing::event!(Level::TRACE, "Received cancellation token, breaking out of the loop.");
+                    break;
+                },
+                maybe_event = connected_channel.receiver().recv() => match maybe_event {
+                    Ok(socket_addr) => {
+                        tracing::event!(Level::DEBUG, ?socket_addr, "Received message from connected_channel");
+                        self.add_connected_worker(socket_addr).await;
+                    },
+                    Err(e) => {
+                        tracing::event!(Level::ERROR, error = ?e, "Received error from connected_channel, ignoring it, recovering...");
+                    },
+                },
+                maybe_event = disconnected_channel.receiver().recv() => match maybe_event {
+                    Ok(socket_addr) => {
+                        tracing::event!(Level::DEBUG, ?socket_addr, "Received message from disconnected_channel");
+                            self.remove_connected_worker(socket_addr).await;
+                    },
+                    Err(e) => {
+                        tracing::event!(Level::ERROR, error = ?e, "Received error from disconnected_channel, ignoring it, recovering...");
+                    },
+                },
+                maybe_event = please_disconnect_channel.receiver().recv() => match maybe_event {
+                    Ok(socket_addr) => {
+                        tracing::event!(Level::DEBUG, ?socket_addr, "Received message from please_disconnect_channel");
+                    },
+                    Err(e) => {
+                        tracing::event!(Level::ERROR, error = ?e, "Received error from please_disconnect_channel, ignoring it, recovering...");
+                    },
+                },
+            };
         }
     }
 
-    pub async fn disconnect_the_worker(&self, socket_addr: SocketAddr) {
-        self.please_disconnect_somebody_tx.send(socket_addr);
+    pub fn new() -> Self {
+        let change_signal = Channel::new();
+
+        Self {
+            shape: Arc::new(tokio::sync::Mutex::new(StateShape::new(
+                change_signal.sender().clone(),
+            ))),
+            change_signal,
+        }
     }
 
-    pub async fn add_connected_worker(&self, socket_addr: SocketAddr) {
+    async fn remove_connected_worker(&self, socket_addr: SocketAddr) {
+        let shape = self.shape.clone();
+        let shape = &mut *shape.lock().await;
+
+        shape.remove_connected_worker(socket_addr);
+    }
+
+    async fn add_connected_worker(&self, socket_addr: SocketAddr) {
         let shape = self.shape.clone();
         let shape = &mut *shape.lock().await;
 
         shape.add_connected_worker(socket_addr);
     }
 
-    pub async fn add_worker_name_to_socket_addr_mapping(
+    async fn add_worker_name_to_socket_addr_mapping(
         &self,
         socket_addr: SocketAddr,
         worker_name: impl Into<String>,
@@ -580,7 +624,7 @@ impl State {
 
     pub async fn changed(&mut self) {
         loop {
-            if let Err(e) = self.change_signal_rx.recv().await {
+            if let Err(e) = self.change_signal.receiver().recv().await {
                 tracing::debug!(error = ?e, "Recoverable (and probably not imporatant) error received while waiting on change_signal_rx");
             } else {
                 break;
