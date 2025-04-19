@@ -80,7 +80,7 @@ impl proto::master_server::Master for MasterServer {
         tracing::info!("new worker connection from address: {socket_addr}");
 
         // if this shows an error, it's better to panic tbh
-        self.connected_tx.send(socket_addr).unwrap();
+        self.connected_channel.sender().send(socket_addr).unwrap();
 
         // When client disconnects we need to send cancellation to the tokio worker
         // that sends responses to the worker.
@@ -94,14 +94,14 @@ impl proto::master_server::Master for MasterServer {
             connection_cancellation_token.clone(),
             socket_addr.clone(),
             in_stream,
-            self.receive_request_tx.clone(),
-            self.disconnected_tx.clone(),
+            self.receive_request_channel.clone(),
+            self.disconnected_channel.clone(),
         ));
 
         tokio::spawn(MasterServer::listen_for_disconnect_request_worker(
             self.cancellation_token.clone(),
             connection_cancellation_token.clone(),
-            self.please_disconnect_tx.subscribe(),
+            self.please_disconnect_channel.clone(),
             socket_addr.clone(),
         ));
 
@@ -109,7 +109,7 @@ impl proto::master_server::Master for MasterServer {
         let (out_stream_tx, out_stream_rx) = mpsc::channel::<Result<MasterPacket, Status>>(128);
 
         tokio::spawn(MasterServer::send_response_worker(
-            self.send_response_tx.subscribe(),
+            self.send_response_channel.clone(),
             out_stream_tx.clone(),
             self.cancellation_token.clone(),
             connection_cancellation_token,
@@ -126,14 +126,14 @@ impl MasterServer {
     pub async fn listen_for_disconnect_request_worker(
         global_cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
-        mut please_disconnect_rx: broadcast::Receiver<SocketAddr>,
+        mut please_disconnect_channel: Channel<SocketAddr>,
         socket_addr: SocketAddr,
     ) {
         loop {
             tokio::select! {
                 _ = connected_cancellation_token.cancelled() => break,
                 _ = global_cancellation_token.cancelled() => break,
-                Ok(requested_socket_addr) = please_disconnect_rx.recv() => if socket_addr == requested_socket_addr {
+                Ok(requested_socket_addr) = please_disconnect_channel.receiver().recv() => if socket_addr == requested_socket_addr {
                     tracing::debug!("Received please disconnect");
                     connected_cancellation_token.cancel();
                 }
@@ -146,8 +146,8 @@ impl MasterServer {
         connection_cancellation_token: CancellationToken,
         socket_addr: SocketAddr,
         mut in_stream: Streaming<WorkerPacket>,
-        receive_request_tx: broadcast::Sender<(SocketAddr, WorkerPacket)>,
-        disconnected_tx: broadcast::Sender<SocketAddr>,
+        receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
+        disconnected_channel: Channel<SocketAddr>,
     ) {
         loop {
             let maybe_event = tokio::select! {
@@ -166,7 +166,7 @@ impl MasterServer {
                     continue;
                 }
                 None => {
-                    disconnected_tx.send(socket_addr);
+                    disconnected_channel.sender().send(socket_addr);
                     connection_cancellation_token.cancel();
                     break;
                 }
@@ -174,12 +174,12 @@ impl MasterServer {
 
             tracing::debug!(event = tracing::field::debug(&event), "Request received");
 
-            receive_request_tx.send((socket_addr, event)).unwrap();
+            receive_request_channel.sender().send((socket_addr, event)).unwrap();
         }
     }
 
     async fn send_response_worker(
-        mut send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
+        mut send_response_channel: Channel<(SocketAddr, MasterPacket)>,
         out_stream_tx: mpsc::Sender<Result<MasterPacket, Status>>,
         cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
@@ -187,7 +187,7 @@ impl MasterServer {
     ) {
         loop {
             let (event_socket_addr, event_data) = tokio::select! {
-                received_event = send_response_rx.recv() => match received_event {
+                received_event = send_response_channel.receiver().recv() => match received_event {
                     Ok(event) => event,
                     Err(e) => {
                         tracing::error!("recoverable error received on local_send_request_receiver on worker address {socket_addr:?}: {e}");
@@ -307,7 +307,7 @@ async fn start_disconnected_listener(
         };
 
         match event {
-            Ok(socket_addr) => state.disconnect_the_worker(socket_addr).await,
+            Ok(socket_addr) => state.disconnect_connected_worker(socket_addr).await,
             Err(e) => {
                 tracing::error!(context = "start_disconnected_listener", error = ?e, "recoverable error received")
             }
