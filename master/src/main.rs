@@ -77,8 +77,11 @@ impl proto::master_server::Master for MasterServer {
             tracing::error!("failed to acquire worker remote address, disconnecting the worker");
             return Status::new(Code::Internal, "failed to acquire worker remote address");
         })?;
+        
+        let _span = tracing::span!(Level::TRACE, "grpc connection", ?socket_addr);
+        _span.enter();
 
-        tracing::info!("new worker connection from address: {socket_addr}");
+        tracing::event!(Level::INFO, "new connection");
 
         // if this shows an error, it's better to panic tbh
         self.connected_channel.sender().send(socket_addr).unwrap();
@@ -135,7 +138,7 @@ impl MasterServer {
                 _ = connected_cancellation_token.cancelled() => break,
                 _ = global_cancellation_token.cancelled() => break,
                 Ok(requested_socket_addr) = please_disconnect_channel.receiver().recv() => if socket_addr == requested_socket_addr {
-                    tracing::debug!("Received please disconnect");
+                    tracing::event!(Level::TRACE, "received please disconnect for our socket");
                     connected_cancellation_token.cancel();
                 }
             }
@@ -153,7 +156,7 @@ impl MasterServer {
         loop {
             let maybe_event = tokio::select! {
                 maybe_event = in_stream.next() => maybe_event,
-                    _ = global_cancellation_token.cancelled() => {
+                _ = global_cancellation_token.cancelled() => {
                     break
                 },
             };
@@ -161,13 +164,17 @@ impl MasterServer {
             let event = match maybe_event {
                 Some(Ok(event)) => event,
                 Some(Err(e)) => {
-                    tracing::error!(
-                        "GRPC Error received from worker on address {socket_addr:?}: {e}"
+                    // TODO: No coś z tym trzeba zrobić w końcu xD
+                    tracing::event!(
+                        Level::ERROR, 
+                        error = ?e,
+                        "GRPC Error received from worker, ignoring."
                     );
                     continue;
                 }
                 None => {
-                    disconnected_channel.sender().send(socket_addr);
+                    // if this panics, it's better to panic tbh
+                    disconnected_channel.sender().send(socket_addr).unwrap();
                     connection_cancellation_token.cancel();
                     break;
                 }
