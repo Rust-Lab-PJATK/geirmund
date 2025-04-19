@@ -278,46 +278,6 @@ async fn main() {
     grpc_server_result.unwrap().unwrap().unwrap();
 }
 
-async fn start_connected_listener(
-    cancellation_token: CancellationToken,
-    state: State,
-    mut connected_rx: broadcast::Receiver<SocketAddr>,
-) {
-    loop {
-        let event = tokio::select! {
-            event = connected_rx.recv() => event,
-                _ = cancellation_token.cancelled() => break,
-        };
-
-        match event {
-            Ok(socket_addr) => state.add_connected_worker(socket_addr).await,
-            Err(e) => {
-                tracing::error!(context = "start_connected_listener", error = ?e, "recoverable error received")
-            }
-        };
-    }
-}
-
-async fn start_disconnected_listener(
-    cancellation_token: CancellationToken,
-    state: State,
-    mut disconnected_rx: broadcast::Receiver<SocketAddr>,
-) {
-    loop {
-        let event = tokio::select! {
-            event = disconnected_rx.recv() => event,
-                _ = cancellation_token.cancelled() => break,
-        };
-
-        match event {
-            Ok(socket_addr) => state.disconnect_connected_worker(socket_addr).await,
-            Err(e) => {
-                tracing::error!(context = "start_disconnected_listener", error = ?e, "recoverable error received")
-            }
-        };
-    }
-}
-
 async fn start_grpc_listener(
     cancellation_token: CancellationToken,
     server: MasterServer,
@@ -354,31 +314,6 @@ async fn start_grpc_listener(
     ready_rx.await.unwrap();
 
     fut
-}
-
-fn start_respond_on_commands_worker(
-    state: State,
-    cancellation_token: CancellationToken,
-    receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let error_cancellation_token = cancellation_token.clone();
-
-        if let Err(error) = respond_on_commands(
-            state,
-            cancellation_token,
-            receive_request_rx,
-            send_response_tx,
-            please_disconnect_tx,
-        )
-        .await
-        {
-            tracing::error!(error = ?error, "Failed to send request to socket handler to send a request with MasterPacket");
-            error_cancellation_token.cancel();
-        }
-    })
 }
 
 #[derive(Clone)]
@@ -649,53 +584,6 @@ impl State {
             .status
             .clone())
     }
-}
-
-async fn respond_on_commands(
-    state: State,
-    cancellation_token: CancellationToken,
-    mut receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-    please_disconnect_tx: broadcast::Sender<core::net::SocketAddr>,
-) -> Result<(), RespondOnHelloCommandError> {
-    loop {
-        let request = tokio::select! {
-            received_req = receive_request_rx.recv() => match received_req {
-                Ok(received_req) => received_req,
-                Err(e) => {
-                    tracing::error!(error = tracing::field::debug(e), "Recoverable error received while listening for new requests");
-                    continue;
-                },
-            },
-            _ = cancellation_token.cancelled() => return Ok(()),
-        };
-
-        let (socket_addr, _) = request;
-
-        match request.1 {
-            WorkerPacket {
-                msg: Some(proto::worker_packet::Msg::HelloCommand(hello_command)),
-            } => {
-                respond_on_hello_command(
-                    state.clone(),
-                    socket_addr,
-                    hello_command,
-                    send_response_tx.clone(),
-                )
-                .await?
-            }
-            _ => unimplemented!(),
-        }
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-enum RespondOnHelloCommandError {
-    #[error("broadcast channel error: {0:?}")]
-    ChannelError(#[from] broadcast::error::SendError<(SocketAddr, MasterPacket)>),
-
-    #[error("worker with given socket addr does not exist: {0:?}")]
-    WorkerWithGivenSocketAddrDoesNotExist(#[from] WorkerWithGivenSocketAddressDoesNotExist),
 }
 
 #[cfg(test)]
