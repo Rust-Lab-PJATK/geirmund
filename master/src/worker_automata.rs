@@ -193,7 +193,18 @@ impl WorkerAutomata {
                     }
                 }
             }
-            _ => unimplemented!(),
+            _ => {
+                self.handle_invalid_packet(
+                    worker_packet,
+                    String::from(
+                        "Received unwanted packet. Sending error message and resetting state to .",
+                    ),
+                    "Expected GenerateCommandResponse, resetting to WaitingToSendGenerateCommand"
+                        .to_string(),
+                    WorkerAutomataState::WaitingForHelloCommand,
+                )
+                .await;
+            }
         }
     }
 
