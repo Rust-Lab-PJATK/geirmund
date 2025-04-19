@@ -55,13 +55,11 @@ impl<T: Clone> Channel<T> {
 pub struct MasterServer {
     port: u16,
     cancellation_token: CancellationToken,
-    send_response_tx: broadcast::Sender<(SocketAddr, MasterPacket)>,
-    _send_response_rx: broadcast::Receiver<(SocketAddr, MasterPacket)>,
-    receive_request_tx: broadcast::Sender<(core::net::SocketAddr, WorkerPacket)>,
-    connected_tx: broadcast::Sender<SocketAddr>,
-    disconnected_tx: broadcast::Sender<SocketAddr>,
-    please_disconnect_tx: broadcast::Sender<SocketAddr>,
-    _please_disconnect_rx: broadcast::Receiver<SocketAddr>,
+    send_response_channel: Channel<(SocketAddr, MasterPacket)>,
+    receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
+    connected_channel: Channel<SocketAddr>,
+    disconnected_channel: Channel<SocketAddr>,
+    please_disconnect_channel: Channel<SocketAddr>,
 }
 
 #[tonic::async_trait]
@@ -246,66 +244,35 @@ async fn main() {
 
     let cancellation_token = CancellationToken::new();
 
-    let (connected_tx, connected_rx) = broadcast::channel(128);
-    let (disconnected_tx, disconnected_rx) = broadcast::channel(128);
-    let (send_response_tx, send_response_rx) = broadcast::channel(128);
-    let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
-    let (please_disconnect_tx, please_disconnect_rx) = broadcast::channel(128);
+    let connected_channel = Channel::new();
+    let disconnected_channel = Channel::new();
+    let send_response_channel = Channel::new();
+    let receive_request_channel = Channel::new();
+    let please_disconnect_channel = Channel::new();
 
     let server = MasterServer {
         port: 50010,
         cancellation_token: cancellation_token.clone(),
-        send_response_tx: send_response_tx.clone(),
-        _send_response_rx: send_response_rx,
-        receive_request_tx,
-        connected_tx,
-        disconnected_tx,
-        please_disconnect_tx: please_disconnect_tx.clone(),
-        _please_disconnect_rx: please_disconnect_rx,
+        connected_channel,
+        disconnected_channel,
+        please_disconnect_channel,
+        send_response_channel,
+        receive_request_channel,
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
-    let state = State::new(please_disconnect_tx.clone());
-
-    let respond_on_commands_cancellation_token = cancellation_token.clone();
-    let respond_on_commands_fut = start_respond_on_commands_worker(
-        state.clone(),
-        respond_on_commands_cancellation_token,
-        receive_request_rx,
-        send_response_tx,
-        please_disconnect_tx,
-    );
-
-    let connected_listener_fut = tokio::spawn(start_connected_listener(
-        cancellation_token.clone(),
-        state.clone(),
-        connected_rx,
-    ));
-    let disconnected_listener_fut = tokio::spawn(start_disconnected_listener(
-        cancellation_token.clone(),
-        state,
-        disconnected_rx,
-    ));
+    let state = State::new();
 
     let (
         grpc_server_result,
-        respond_on_commands_result,
-        connected_listener_result,
-        disconnected_listener_result,
     ) = tokio::join!(
         grpc_server_fut,
-        respond_on_commands_fut,
-        connected_listener_fut,
-        disconnected_listener_fut
     );
 
     grpc_server_result.unwrap().unwrap().unwrap();
-    respond_on_commands_result.unwrap();
-    connected_listener_result.unwrap();
-    disconnected_listener_result.unwrap();
 }
 
 async fn start_connected_listener(
