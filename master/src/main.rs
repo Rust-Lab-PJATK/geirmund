@@ -1,6 +1,7 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
 use tracing::Level;
+use worker_automata::{WorkerAutomata, WorkerAutomataState};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     pin::Pin,
@@ -56,11 +57,13 @@ impl<T: Clone> Channel<T> {
 pub struct MasterServer {
     port: u16,
     cancellation_token: CancellationToken,
+    state: State,
     send_response_channel: Channel<(SocketAddr, MasterPacket)>,
     receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
     connected_channel: Channel<SocketAddr>,
     disconnected_channel: Channel<SocketAddr>,
     please_disconnect_channel: Channel<SocketAddr>,
+    change_worker_automata_state_channel: Channel<(SocketAddr, WorkerAutomataState)>,
 }
 
 #[tonic::async_trait]
@@ -109,6 +112,64 @@ impl proto::master_server::Master for MasterServer {
             socket_addr.clone(),
         ));
 
+        // WORKER AUTOMATA START
+
+        // Conversion channels
+        let local_change_worker_automata_state_channel = Channel::new();
+
+        tokio::spawn(Self::start_worker_channel_converter(
+            connection_cancellation_token.clone(), 
+            local_change_worker_automata_state_channel.clone(),
+            self.change_worker_automata_state_channel.clone(), 
+            socket_addr,
+            |worker_automata_state, socket_addr| (socket_addr, worker_automata_state),
+        ));
+
+        let mut local_receive_request_channel = Channel::new();
+
+        tokio::spawn(Self::start_worker_channel_converter(
+            connection_cancellation_token.clone(), 
+            local_receive_request_channel.clone(),
+            self.receive_request_channel.clone(), 
+            socket_addr,
+            |worker_packet, socket_addr| (socket_addr, worker_packet),
+        ));
+
+        let local_send_response_channel: Channel<MasterPacket> = Channel::new();
+
+        tokio::spawn(Self::start_worker_channel_converter(
+            connection_cancellation_token.clone(), 
+            local_send_response_channel.clone(), 
+            self.send_response_channel.clone(), 
+            socket_addr,
+            |master_packet, socket_addr| (socket_addr, master_packet),
+        ));
+
+        let please_disconnect_me_channel: Channel<()> = Channel::new();
+
+        tokio::spawn(Self::start_worker_channel_converter(
+            connection_cancellation_token.clone(), 
+            please_disconnect_me_channel.clone(), 
+            self.please_disconnect_channel.clone(), 
+            socket_addr,
+            |_, socket_addr| socket_addr,
+        ));
+
+        // final initialization of WA
+        let mut worker_automata = WorkerAutomata::new(
+            connection_cancellation_token.clone(), 
+            socket_addr.clone(), 
+            self.state.clone(),
+            local_change_worker_automata_state_channel.clone(), 
+            local_receive_request_channel.clone(),
+            local_send_response_channel.clone(),
+            please_disconnect_me_channel.clone()
+        );
+
+        tokio::spawn(async move {
+            worker_automata.run();
+        });
+
         // Send response to worker
         let (out_stream_tx, out_stream_rx) = mpsc::channel::<Result<MasterPacket, Status>>(128);
 
@@ -127,6 +188,24 @@ impl proto::master_server::Master for MasterServer {
 }
 
 impl MasterServer {
+    async fn start_worker_channel_converter<T: Clone, K: Clone, L: Fn(T, SocketAddr) -> K>(cancellation_token: CancellationToken, mut source_channel: Channel<T>, destination_channel: Channel<K>, socket_addr: SocketAddr, conversion_lambda: L) {
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    break;
+                }
+                maybe_event = source_channel.receiver().recv() => match maybe_event {
+                    Ok(data) => {
+                        destination_channel.sender().send(conversion_lambda(data, socket_addr));
+                    }
+                    Err(error) => {
+                        tracing::event!(Level::ERROR, ?error, "Received an error while trying to convert message from source channel to destination channel");
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn listen_for_disconnect_request_worker(
         global_cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
@@ -252,20 +331,25 @@ async fn main() {
 
     let cancellation_token = CancellationToken::new();
 
+    let state = State::new();
+
     let connected_channel = Channel::new();
     let disconnected_channel = Channel::new();
     let send_response_channel = Channel::new();
     let receive_request_channel = Channel::new();
     let please_disconnect_channel = Channel::new();
+    let change_worker_automata_state_channel = Channel::new();
 
     let server = MasterServer {
         port: 50010,
+        state: state.clone(),
         cancellation_token: cancellation_token.clone(),
         connected_channel: connected_channel.clone(),
         disconnected_channel: disconnected_channel.clone(),
         please_disconnect_channel: please_disconnect_channel.clone(),
         send_response_channel,
         receive_request_channel,
+        change_worker_automata_state_channel,
     };
 
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
