@@ -62,8 +62,6 @@ pub struct MasterServer {
     state: State,
     send_response_channel: Channel<(SocketAddr, MasterPacket)>,
     receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
-    connected_channel: Channel<SocketAddr>,
-    disconnected_channel: Channel<SocketAddr>,
     please_disconnect_channel: Channel<SocketAddr>,
     change_worker_automata_state_channel: Channel<(SocketAddr, WorkerAutomataState)>,
 }
@@ -88,8 +86,7 @@ impl proto::master_server::Master for MasterServer {
 
         tracing::event!(Level::INFO, "new connection");
 
-        // if this shows an error, it's better to panic tbh
-        self.connected_channel.sender().send(socket_addr).unwrap();
+        self.add_worker_to_state(socket_addr).await?;
 
         // When client disconnects we need to send cancellation to the tokio worker
         // that sends responses to the worker.
@@ -98,17 +95,25 @@ impl proto::master_server::Master for MasterServer {
         // Receive request from worker
         let in_stream = request.into_inner();
 
+        tokio::spawn(Self::cancel_connection_cancellation_token_if_global_is_cancelled(
+            self.cancellation_token.clone(), 
+            connection_cancellation_token.clone()
+        ));
+
+        tokio::spawn(Self::remove_worker_from_state_worker(
+            self.state.clone(), 
+            connection_cancellation_token.clone(), 
+            socket_addr
+        ));
+
         tokio::spawn(MasterServer::receive_request_worker(
-            self.cancellation_token.clone(),
             connection_cancellation_token.clone(),
             socket_addr.clone(),
             in_stream,
             self.receive_request_channel.clone(),
-            self.disconnected_channel.clone(),
         ));
 
         tokio::spawn(MasterServer::listen_for_disconnect_request_worker(
-            self.cancellation_token.clone(),
             connection_cancellation_token.clone(),
             self.please_disconnect_channel.clone(),
             socket_addr.clone(),
@@ -190,6 +195,56 @@ impl proto::master_server::Master for MasterServer {
 }
 
 impl MasterServer {
+    async fn add_worker_to_state(&self, socket_addr: SocketAddr) -> Result<(), Status> {
+        let mut tx = self.state.start_transaction().await.map_err(|err| {
+            tracing::event!(Level::ERROR, %err, "failed to start tranasaction in internal db");
+            return Status::new(Code::Internal, "failed to start tranasaction in internal db");
+        })?;
+
+        self.state.create_worker(&mut tx, socket_addr).await.map_err(|err| {
+            tracing::event!(Level::ERROR, %err, "failed to add worker to internal database");
+            return Status::new(Code::Internal, "failed to add worker to internal database");
+        })?;
+
+        tx.commit().await.map_err(|err| {
+            tracing::event!(Level::ERROR, %err, "failed to commit adding worker to internal database");
+            return Status::new(Code::Internal, "failed to commit adding worker to internal database");
+        })?;
+
+        Ok(())
+    }
+
+    async fn cancel_connection_cancellation_token_if_global_is_cancelled(global_cancellation_token: CancellationToken, connection_cancellation_token: CancellationToken) {
+        tokio::select! {
+            _ = global_cancellation_token.cancelled() => {
+                connection_cancellation_token.cancel();
+            },
+            _ = connection_cancellation_token.cancelled() => {}
+        };
+    }
+
+    // If connection cancellation token is cancelled, then remove worker from the state
+    async fn remove_worker_from_state_worker(state: State, connection_cancellation_token: CancellationToken, socket_addr: SocketAddr){
+        tokio::select! {
+            _ = connection_cancellation_token.cancelled() => {
+                let mut tx = match state.start_transaction().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::event!(Level::ERROR, %e, "error occured while trying to open transaction");
+                        return;
+                    }
+                };
+
+                state.delete_worker(&mut tx, socket_addr);
+
+                if let Err(e) = tx.commit().await {
+                    tracing::event!(Level::ERROR, %e, "error occured while trying to commit transaction");
+                    return;
+                }
+            }
+        };
+    }
+
     async fn start_worker_channel_converter<T: Clone, K: Clone, L: Fn(T, SocketAddr) -> K>(cancellation_token: CancellationToken, mut source_channel: Channel<T>, destination_channel: Channel<K>, socket_addr: SocketAddr, conversion_lambda: L) {
         loop {
             tokio::select! {
@@ -209,7 +264,6 @@ impl MasterServer {
     }
 
     pub async fn listen_for_disconnect_request_worker(
-        global_cancellation_token: CancellationToken,
         connected_cancellation_token: CancellationToken,
         mut please_disconnect_channel: Channel<SocketAddr>,
         socket_addr: SocketAddr,
@@ -217,7 +271,6 @@ impl MasterServer {
         loop {
             tokio::select! {
                 _ = connected_cancellation_token.cancelled() => break,
-                _ = global_cancellation_token.cancelled() => break,
                 Ok(requested_socket_addr) = please_disconnect_channel.receiver().recv() => if socket_addr == requested_socket_addr {
                     tracing::event!(Level::TRACE, "received please disconnect for our socket");
                     connected_cancellation_token.cancel();
@@ -227,17 +280,15 @@ impl MasterServer {
     }
 
     async fn receive_request_worker(
-        global_cancellation_token: CancellationToken,
         connection_cancellation_token: CancellationToken,
         socket_addr: SocketAddr,
         mut in_stream: Streaming<WorkerPacket>,
         receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
-        disconnected_channel: Channel<SocketAddr>,
     ) {
         loop {
             let maybe_event = tokio::select! {
                 maybe_event = in_stream.next() => maybe_event,
-                _ = global_cancellation_token.cancelled() => {
+                _ = connection_cancellation_token.cancelled() => {
                     break
                 },
             };
@@ -254,8 +305,6 @@ impl MasterServer {
                     continue;
                 }
                 None => {
-                    // if this panics, it's better to panic tbh
-                    disconnected_channel.sender().send(socket_addr).unwrap();
                     connection_cancellation_token.cancel();
                     break;
                 }
