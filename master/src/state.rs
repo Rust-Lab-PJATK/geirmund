@@ -5,13 +5,9 @@ use error::{
     SetLoadingModelStatusError, SetModelError,
 };
 use proto::ModelType;
-use sqlx::{
-    migrate, Decode, Encode, Pool, Sqlite, SqliteExecutor, SqlitePool, SqliteTransaction, Type,
-};
-use tokio_util::sync::CancellationToken;
-use tracing::Level;
+use sqlx::{migrate, Decode, Encode, Pool, Sqlite, SqlitePool, SqliteTransaction, Type};
 
-use crate::{worker_automata::WorkerAutomataState, Channel};
+use crate::Channel;
 
 pub struct StateTransaction<'a> {
     tx: SqliteTransaction<'a>,
@@ -22,7 +18,7 @@ impl<'a> StateTransaction<'a> {
     pub async fn commit(self) -> Result<(), sqlx::Error> {
         self.tx.commit().await?;
 
-        self.change_signal.sender().send(());
+        self.change_signal.sender().send(()).unwrap();
 
         Ok(())
     }
@@ -421,18 +417,12 @@ pub mod error {
 
     #[derive(thiserror::Error, Debug)]
     pub enum CreateGenerationQueryError {
-        #[error("worker with given socket addr does not exist: {0}")]
-        WorkerWithGivenSocketAddrDoesNotExist(SocketAddr),
-
         #[error("database error: {0}")]
         DatabaseError(#[from] sqlx::Error),
     }
 
     #[derive(thiserror::Error, Debug)]
     pub enum SetStatusOfGenerationQueryError {
-        #[error("generation query with id {0} does not exist")]
-        GenerationQueryDoesNotExist(i64),
-
         #[error("database error: {0}")]
         DatabaseError(#[from] sqlx::Error),
     }

@@ -4,12 +4,10 @@ use state::State;
 use tracing::Level;
 use worker_automata::{WorkerAutomata, WorkerAutomataState};
 use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    pin::Pin,
-    sync::Arc,
+    fmt::Debug, net::{SocketAddr, ToSocketAddrs}, pin::Pin
 };
 use tokio::{
-    sync::{broadcast, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -82,7 +80,7 @@ impl proto::master_server::Master for MasterServer {
         })?;
         
         let _span = tracing::span!(Level::TRACE, "grpc connection", ?socket_addr);
-        _span.enter();
+        let _ = _span.enter();
 
         tracing::event!(Level::INFO, "new connection");
 
@@ -132,7 +130,7 @@ impl proto::master_server::Master for MasterServer {
             |worker_automata_state, socket_addr| (socket_addr, worker_automata_state),
         ));
 
-        let mut local_receive_request_channel = Channel::new();
+        let local_receive_request_channel = Channel::new();
 
         tokio::spawn(Self::start_worker_channel_converter(
             connection_cancellation_token.clone(), 
@@ -174,7 +172,7 @@ impl proto::master_server::Master for MasterServer {
         );
 
         tokio::spawn(async move {
-            worker_automata.run();
+            worker_automata.run().await;
         });
 
         // Send response to worker
@@ -235,7 +233,10 @@ impl MasterServer {
                     }
                 };
 
-                state.delete_worker(&mut tx, socket_addr);
+                if let Err(e) = state.delete_worker(&mut tx, socket_addr).await {
+                    tracing::event!(Level::ERROR, %e, "error occured while trying to delete worker from internal db");
+                    return;
+                }
 
                 if let Err(e) = tx.commit().await {
                     tracing::event!(Level::ERROR, %e, "error occured while trying to commit transaction");
@@ -245,7 +246,7 @@ impl MasterServer {
         };
     }
 
-    async fn start_worker_channel_converter<T: Clone, K: Clone, L: Fn(T, SocketAddr) -> K>(cancellation_token: CancellationToken, mut source_channel: Channel<T>, destination_channel: Channel<K>, socket_addr: SocketAddr, conversion_lambda: L) {
+    async fn start_worker_channel_converter<T: Clone, K: Clone + Debug, L: Fn(T, SocketAddr) -> K>(cancellation_token: CancellationToken, mut source_channel: Channel<T>, destination_channel: Channel<K>, socket_addr: SocketAddr, conversion_lambda: L) {
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
@@ -253,7 +254,7 @@ impl MasterServer {
                 }
                 maybe_event = source_channel.receiver().recv() => match maybe_event {
                     Ok(data) => {
-                        destination_channel.sender().send(conversion_lambda(data, socket_addr));
+                        destination_channel.sender().send(conversion_lambda(data, socket_addr)).unwrap();
                     }
                     Err(error) => {
                         tracing::event!(Level::ERROR, ?error, "Received an error while trying to convert message from source channel to destination channel");
@@ -472,7 +473,7 @@ mod tests {
     use tonic::transport::Channel;
 
     use crate::{
-        protobuf, start_grpc_listener, start_respond_on_commands_worker, MasterServer, State,
+        protobuf, start_grpc_listener, MasterServer, State,
     };
 
     struct MasterTesting {

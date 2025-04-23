@@ -72,12 +72,12 @@ impl WorkerAutomata {
         loop {
             tokio::select! {
                 _ = self.external_cancellation_token.cancelled() => {
-                    self.disconnect_from_worker_channel.sender().send(());
+                    self.disconnect_from_worker_channel.sender().send(()).unwrap();
                     return;
                 },
                 maybe_worker_packet = self.receive_worker_packets_channel.receiver().recv() => {
                     if matches!(self.automata_state, WorkerAutomataState::End) {
-                        self.disconnect_from_worker_channel.sender().send(());
+                        self.disconnect_from_worker_channel.sender().send(()).unwrap();
                         self.external_cancellation_token.cancel();
                         return;
                     }
@@ -86,7 +86,7 @@ impl WorkerAutomata {
                         Ok(worker_packet) => if let Err(e) = self.react_to_new_worker_packet(worker_packet).await {
                             tracing::event!(Level::ERROR, error = %e, "unrecoverable error received from react_to_new_worker_packet");
 
-                            self.disconnect_from_worker_channel.sender().send(());
+                            self.disconnect_from_worker_channel.sender().send(()).unwrap();
                             self.external_cancellation_token.cancel();
                         },
                         Err(e) => {
@@ -96,14 +96,14 @@ impl WorkerAutomata {
                 },
                 _ = self.change_state_channel.receiver().recv() => {
                     if matches!(self.automata_state, WorkerAutomataState::End) {
-                        self.disconnect_from_worker_channel.sender().send(());
+                        self.disconnect_from_worker_channel.sender().send(()).unwrap();
                         self.external_cancellation_token.cancel();
                         return;
                     }
 
                     if let Err(e) = self.react_to_change_of_state().await {
                         tracing::event!(Level::ERROR, error = %e, "unrecoverable error received from react_to_change_of_state");
-                        self.disconnect_from_worker_channel.sender().send(());
+                        self.disconnect_from_worker_channel.sender().send(()).unwrap();
                         self.external_cancellation_token.cancel();
                     }
                 }
@@ -216,7 +216,8 @@ impl WorkerAutomata {
                             "Wrong model has been loaded, expected {:?}, received {loaded_model:?}",
                             worker.model().unwrap()
                         ),
-                        ));
+                        ))
+                        .await;
                     }
                 }
                 _ => {
@@ -229,14 +230,14 @@ impl WorkerAutomata {
                         .map(|worker| worker.model().unwrap_or(ModelType::Llama3v21b))
                         .unwrap_or(ModelType::Llama3v21b);
 
-                    tx.rollback();
+                    tx.rollback().await?;
 
                     self.handle_invalid_packet(
                         worker_packet,
                         String::from("Received invalid packet, expected LoadCommandResponse. Sending error message and resetting state to WaitingToSendLoadCommand."),
                         "Expected LoadCommandResponse, resetting to WaitingToSendLoadCommand".to_string(),
                         WorkerAutomataState::WaitingToSendLoadCommand(model),
-                    ).await;
+                    ).await?;
                 }
             },
             WorkerAutomataState::WaitingForGenerateCommandResponse {
@@ -258,7 +259,7 @@ impl WorkerAutomata {
                         String::from("Received invalid packet, expected GenerateCommandResponse. Sending error message and resetting state to WaitingToSendGenerateCommand."),
                         "Expected GenerateCommandResponse, resetting to WaitingToSendGenerateCommand".to_string(),
                         WorkerAutomataState::WaitingToSendGenerateCommand,
-                    ).await;
+                    ).await?;
                 }
             },
             _ => {
@@ -271,7 +272,7 @@ impl WorkerAutomata {
                         .to_string(),
                     WorkerAutomataState::WaitingForHelloCommand,
                 )
-                .await;
+                .await?;
             }
         };
 
@@ -289,7 +290,8 @@ impl WorkerAutomata {
 
         self.send_error(proto::master_error::Msg::UnexpectedPacketReceived(
             error_packet_message,
-        ));
+        ))
+        .await;
 
         let mut tx = self.master_state.start_transaction().await?;
 
@@ -415,7 +417,8 @@ impl WorkerAutomata {
             self.send_error(proto::master_error::Msg::YouAlreadyHaveANameError(format!(
                 "You already have a name assigned: {}!",
                 worker_name.clone().unwrap()
-            )));
+            )))
+            .await;
 
             tracing::event!(Level::ERROR, current_name = %worker_name.unwrap(), requested_worker_name = %hello_command.name, "Worker requested to be registered as a new worker, but he is already registered");
         } else if self
@@ -434,7 +437,8 @@ impl WorkerAutomata {
                     "Worker with name {} already exists! Choose something else.",
                     hello_command.name
                 ),
-            ));
+            ))
+            .await;
 
             tracing::event!(Level::ERROR, socket_addr = ?self.socket_addr, already_taken_name = %hello_command.name, "Worker requested to be registered as a new worker, but the requested name is already taken");
         } else {
@@ -489,11 +493,12 @@ impl WorkerAutomata {
         let expected_model = worker.model().unwrap();
 
         if expected_model != loaded_model {
-            tx.rollback();
+            tx.rollback().await?;
 
             self.send_error(proto::master_error::Msg::WrongModelHasBeenLoaded(format!(
                 "Expected to load {expected_model:?}, received {loaded_model:?}"
-            )));
+            )))
+            .await;
 
             self.change_state(WorkerAutomataState::WaitingToSendLoadCommand(
                 expected_model,
@@ -545,9 +550,6 @@ pub mod error {
 
         #[error("error occured while trying to set model for worker: {0}")]
         SetModelError(#[from] crate::state::error::SetModelError),
-
-        #[error("worker with socket addr {0} does not exist inside internal database")]
-        WorkerDoesNotExistInDatabase(SocketAddr),
 
         #[error("error occured while trying to generate query: {0}")]
         CreateGenerationQueryError(#[from] CreateGenerationQueryError),
