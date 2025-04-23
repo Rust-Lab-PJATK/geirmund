@@ -382,10 +382,14 @@ async fn main() {
 
     let cancellation_token = CancellationToken::new();
 
-    let state = State::new();
+    let state = match State::new().await {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(?error, "error occured while trying to create state");
+            std::process::exit(1);
+        }
+    };
 
-    let connected_channel = Channel::new();
-    let disconnected_channel = Channel::new();
     let send_response_channel = Channel::new();
     let receive_request_channel = Channel::new();
     let please_disconnect_channel = Channel::new();
@@ -395,8 +399,6 @@ async fn main() {
         port: 50010,
         state: state.clone(),
         cancellation_token: cancellation_token.clone(),
-        connected_channel: connected_channel.clone(),
-        disconnected_channel: disconnected_channel.clone(),
         please_disconnect_channel: please_disconnect_channel.clone(),
         send_response_channel,
         receive_request_channel,
@@ -406,10 +408,6 @@ async fn main() {
     tracing::info!("Starting GRPC tcp listener... (there will be no confirmation log)");
 
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
-
-    let state = State::new();
-
-    state.start_watcher(cancellation_token, connected_channel, disconnected_channel, please_disconnect_channel);
 
     let (
         grpc_server_result,
