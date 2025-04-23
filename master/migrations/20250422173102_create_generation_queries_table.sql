@@ -1,0 +1,6 @@
+CREATE TABLE generation_queries (
+	id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+	socket_addr TEXT NOT NULL REFERENCES workers (socket_addr),
+	query TEXT NOT NULL,
+	is_generating BOOLEAN NOT NULL DEFAULT FALSE
+) STRICT;

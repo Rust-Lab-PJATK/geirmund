@@ -1,5 +1,6 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
+use state::State;
 use tracing::Level;
 use worker_automata::{WorkerAutomata, WorkerAutomataState};
 use std::{
@@ -16,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod state;
 mod protobuf;
 mod worker_automata;
 
