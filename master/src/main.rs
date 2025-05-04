@@ -1,10 +1,10 @@
 use futures::{Stream, StreamExt};
 use proto::{MasterPacket, WorkerPacket};
 use state::State;
-use tracing::Level;
-use worker_automata::{WorkerAutomata, WorkerAutomataState};
 use std::{
-    fmt::Debug, net::{SocketAddr, ToSocketAddrs}, pin::Pin
+    fmt::Debug,
+    net::{SocketAddr, ToSocketAddrs},
+    pin::Pin,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -13,10 +13,12 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
+use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use worker_automata::{WorkerAutomata, WorkerAutomataState};
 
-mod state;
 mod protobuf;
+mod state;
 mod worker_automata;
 
 pub struct Channel<T: Clone> {
@@ -78,7 +80,7 @@ impl proto::master_server::Master for MasterServer {
             tracing::error!("failed to acquire worker remote address, disconnecting the worker");
             return Status::new(Code::Internal, "failed to acquire worker remote address");
         })?;
-        
+
         let _span = tracing::span!(Level::TRACE, "grpc connection", ?socket_addr);
         let _ = _span.enter();
 
@@ -93,15 +95,17 @@ impl proto::master_server::Master for MasterServer {
         // Receive request from worker
         let in_stream = request.into_inner();
 
-        tokio::spawn(Self::cancel_connection_cancellation_token_if_global_is_cancelled(
-            self.cancellation_token.clone(), 
-            connection_cancellation_token.clone()
-        ));
+        tokio::spawn(
+            Self::cancel_connection_cancellation_token_if_global_is_cancelled(
+                self.cancellation_token.clone(),
+                connection_cancellation_token.clone(),
+            ),
+        );
 
         tokio::spawn(Self::remove_worker_from_state_worker(
-            self.state.clone(), 
-            connection_cancellation_token.clone(), 
-            socket_addr
+            self.state.clone(),
+            connection_cancellation_token.clone(),
+            socket_addr,
         ));
 
         tokio::spawn(MasterServer::receive_request_worker(
@@ -123,9 +127,9 @@ impl proto::master_server::Master for MasterServer {
         let local_change_worker_automata_state_channel = Channel::new();
 
         tokio::spawn(Self::start_worker_channel_converter(
-            connection_cancellation_token.clone(), 
+            connection_cancellation_token.clone(),
             local_change_worker_automata_state_channel.clone(),
-            self.change_worker_automata_state_channel.clone(), 
+            self.change_worker_automata_state_channel.clone(),
             socket_addr,
             |worker_automata_state, socket_addr| (socket_addr, worker_automata_state),
         ));
@@ -133,9 +137,9 @@ impl proto::master_server::Master for MasterServer {
         let local_receive_request_channel = Channel::new();
 
         tokio::spawn(Self::start_worker_channel_converter(
-            connection_cancellation_token.clone(), 
+            connection_cancellation_token.clone(),
             local_receive_request_channel.clone(),
-            self.receive_request_channel.clone(), 
+            self.receive_request_channel.clone(),
             socket_addr,
             |worker_packet, socket_addr| (socket_addr, worker_packet),
         ));
@@ -143,9 +147,9 @@ impl proto::master_server::Master for MasterServer {
         let local_send_response_channel: Channel<MasterPacket> = Channel::new();
 
         tokio::spawn(Self::start_worker_channel_converter(
-            connection_cancellation_token.clone(), 
-            local_send_response_channel.clone(), 
-            self.send_response_channel.clone(), 
+            connection_cancellation_token.clone(),
+            local_send_response_channel.clone(),
+            self.send_response_channel.clone(),
             socket_addr,
             |master_packet, socket_addr| (socket_addr, master_packet),
         ));
@@ -153,22 +157,22 @@ impl proto::master_server::Master for MasterServer {
         let please_disconnect_me_channel: Channel<()> = Channel::new();
 
         tokio::spawn(Self::start_worker_channel_converter(
-            connection_cancellation_token.clone(), 
-            please_disconnect_me_channel.clone(), 
-            self.please_disconnect_channel.clone(), 
+            connection_cancellation_token.clone(),
+            please_disconnect_me_channel.clone(),
+            self.please_disconnect_channel.clone(),
             socket_addr,
             |_, socket_addr| socket_addr,
         ));
 
         // final initialization of WA
         let mut worker_automata = WorkerAutomata::new(
-            connection_cancellation_token.clone(), 
-            socket_addr.clone(), 
+            connection_cancellation_token.clone(),
+            socket_addr.clone(),
             self.state.clone(),
-            local_change_worker_automata_state_channel.clone(), 
+            local_change_worker_automata_state_channel.clone(),
             local_receive_request_channel.clone(),
             local_send_response_channel.clone(),
-            please_disconnect_me_channel.clone()
+            please_disconnect_me_channel.clone(),
         );
 
         tokio::spawn(async move {
@@ -196,13 +200,19 @@ impl MasterServer {
     async fn add_worker_to_state(&self, socket_addr: SocketAddr) -> Result<(), Status> {
         let mut tx = self.state.start_transaction().await.map_err(|err| {
             tracing::event!(Level::ERROR, %err, "failed to start tranasaction in internal db");
-            return Status::new(Code::Internal, "failed to start tranasaction in internal db");
+            return Status::new(
+                Code::Internal,
+                "failed to start tranasaction in internal db",
+            );
         })?;
 
-        self.state.create_worker(&mut tx, socket_addr).await.map_err(|err| {
-            tracing::event!(Level::ERROR, %err, "failed to add worker to internal database");
-            return Status::new(Code::Internal, "failed to add worker to internal database");
-        })?;
+        self.state
+            .create_worker(&mut tx, socket_addr)
+            .await
+            .map_err(|err| {
+                tracing::event!(Level::ERROR, %err, "failed to add worker to internal database");
+                return Status::new(Code::Internal, "failed to add worker to internal database");
+            })?;
 
         tx.commit().await.map_err(|err| {
             tracing::event!(Level::ERROR, %err, "failed to commit adding worker to internal database");
@@ -212,7 +222,10 @@ impl MasterServer {
         Ok(())
     }
 
-    async fn cancel_connection_cancellation_token_if_global_is_cancelled(global_cancellation_token: CancellationToken, connection_cancellation_token: CancellationToken) {
+    async fn cancel_connection_cancellation_token_if_global_is_cancelled(
+        global_cancellation_token: CancellationToken,
+        connection_cancellation_token: CancellationToken,
+    ) {
         tokio::select! {
             _ = global_cancellation_token.cancelled() => {
                 connection_cancellation_token.cancel();
@@ -222,7 +235,11 @@ impl MasterServer {
     }
 
     // If connection cancellation token is cancelled, then remove worker from the state
-    async fn remove_worker_from_state_worker(state: State, connection_cancellation_token: CancellationToken, socket_addr: SocketAddr){
+    async fn remove_worker_from_state_worker(
+        state: State,
+        connection_cancellation_token: CancellationToken,
+        socket_addr: SocketAddr,
+    ) {
         tokio::select! {
             _ = connection_cancellation_token.cancelled() => {
                 let mut tx = match state.start_transaction().await {
@@ -246,7 +263,17 @@ impl MasterServer {
         };
     }
 
-    async fn start_worker_channel_converter<T: Clone, K: Clone + Debug, L: Fn(T, SocketAddr) -> K>(cancellation_token: CancellationToken, mut source_channel: Channel<T>, destination_channel: Channel<K>, socket_addr: SocketAddr, conversion_lambda: L) {
+    async fn start_worker_channel_converter<
+        T: Clone,
+        K: Clone + Debug,
+        L: Fn(T, SocketAddr) -> K,
+    >(
+        cancellation_token: CancellationToken,
+        mut source_channel: Channel<T>,
+        destination_channel: Channel<K>,
+        socket_addr: SocketAddr,
+        conversion_lambda: L,
+    ) {
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
@@ -299,7 +326,7 @@ impl MasterServer {
                 Some(Err(e)) => {
                     // TODO: No coś z tym trzeba zrobić w końcu xD
                     tracing::event!(
-                        Level::ERROR, 
+                        Level::ERROR,
                         error = ?e,
                         "GRPC Error received from worker, ignoring."
                     );
@@ -313,7 +340,10 @@ impl MasterServer {
 
             tracing::debug!(event = tracing::field::debug(&event), "Request received");
 
-            receive_request_channel.sender().send((socket_addr, event)).unwrap();
+            receive_request_channel
+                .sender()
+                .send((socket_addr, event))
+                .unwrap();
         }
     }
 
@@ -410,11 +440,7 @@ async fn main() {
 
     let grpc_server_fut = start_grpc_listener(cancellation_token.clone(), server).await;
 
-    let (
-        grpc_server_result,
-    ) = tokio::join!(
-        grpc_server_fut,
-    );
+    let (grpc_server_result,) = tokio::join!(grpc_server_fut,);
 
     grpc_server_result.unwrap().unwrap().unwrap();
 }
@@ -459,79 +485,65 @@ async fn start_grpc_listener(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::net::SocketAddr;
+    use std::time::Duration;
 
     use futures::StreamExt;
     use proto::worker_packet::Msg as WorkerPacketMsg;
     use proto::{master_client::MasterClient, HelloCommand, MasterPacket, WorkerPacket};
-    use tokio::{
-        sync::{broadcast, mpsc},
-        task::JoinHandle,
-    };
+    use tokio::{sync::mpsc, task::JoinHandle};
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_util::sync::CancellationToken;
-    use tonic::transport::Channel;
 
-    use crate::{
-        protobuf, start_grpc_listener, MasterServer, State,
-    };
+    use crate::worker_automata::WorkerAutomataState;
+    use crate::{protobuf, start_grpc_listener, Channel, MasterServer, State};
 
     struct MasterTesting {
         server_port: u16,
         cancellation_token: CancellationToken,
         grpc_fut: JoinHandle<Option<Result<(), tonic::transport::Error>>>,
-        respond_to_commands_fut: JoinHandle<()>,
-        receive_request_rx: broadcast::Receiver<(core::net::SocketAddr, WorkerPacket)>,
-        clients: HashMap<i32, MasterTestingClient>,
+        change_worker_automata_state_channel: Channel<(SocketAddr, WorkerAutomataState)>,
+        send_response_channel: Channel<(SocketAddr, MasterPacket)>,
+        please_disconnect_channel: Channel<SocketAddr>,
+        receive_request_channel: Channel<(SocketAddr, WorkerPacket)>,
     }
 
     impl MasterTesting {
         pub async fn new() -> Self {
             let cancellation_token = CancellationToken::new();
-            // set up listener
-            let (send_response_tx, send_response_rx) = broadcast::channel(128);
-            let (receive_request_tx, receive_request_rx) = broadcast::channel(128);
 
             let server_port = 10000 + rand::random::<u16>() % 50000;
+
+            let change_worker_automata_state_channel = Channel::new();
+            let send_response_channel = Channel::new();
+            let please_disconnect_channel = Channel::new();
+            let receive_request_channel = Channel::new();
 
             let server = MasterServer {
                 port: server_port,
                 cancellation_token: cancellation_token.clone(),
-                send_response_tx: send_response_tx.clone(),
-                send_response_rx,
-                receive_request_tx: receive_request_tx.clone(),
+                state: State::new().await.unwrap(),
+                change_worker_automata_state_channel: change_worker_automata_state_channel.clone(),
+                send_response_channel: send_response_channel.clone(),
+                please_disconnect_channel: please_disconnect_channel.clone(),
+                receive_request_channel: receive_request_channel.clone(),
             };
 
             let grpc_fut = start_grpc_listener(cancellation_token.clone(), server).await;
-            let state = State::new();
-            let respond_to_commands_fut = start_respond_on_commands_worker(
-                state,
-                cancellation_token.clone(),
-                receive_request_tx.subscribe(),
-                send_response_tx,
-            );
 
             Self {
                 server_port,
                 cancellation_token,
                 grpc_fut,
-                respond_to_commands_fut,
-                receive_request_rx,
-                clients: HashMap::new(),
+                change_worker_automata_state_channel,
+                send_response_channel,
+                please_disconnect_channel,
+                receive_request_channel,
             }
         }
 
         pub async fn connect_new_client(mut self, id: i32) -> Self {
-            if self.clients.contains_key(&id) {
-                panic!("Client with id {id} is already connected.");
-            }
-
-            self.clients.insert(
-                id,
-                MasterTestingClient::new(self.cancellation_token.clone(), self.server_port).await,
-            );
-
-            self
+            todo!()
         }
 
         pub async fn send_packet_to_master(
@@ -539,43 +551,18 @@ mod tests {
             client_id: i32,
             packet: proto::WorkerPacket,
         ) -> Self {
-            let client = self.clients.remove(&client_id).unwrap().send(packet).await;
-
-            self.clients.insert(client_id, client);
-
-            self
+            todo!()
         }
 
         pub async fn assert_if_identical_packet_has_been_received_on_master(
             mut self,
             expected_packet: proto::WorkerPacket,
         ) -> Self {
-            let event = tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                    assert!(false, "Time exceeded.");
-                    unreachable!();
-                }
-                event = self.receive_request_rx.recv() => event
-            };
-
-            assert!(
-                matches!(
-                    &event,
-                    Ok((_, packet)) if *packet == expected_packet 
-                ),
-                "Expected to receive identical HelloCommand {expected_packet:?}, received {event:?} instead."
-            );
-
-            self
+            todo!()
         }
 
         pub async fn cancel(self) {
-            self.cancellation_token.cancel();
-
-            let results = tokio::join!(self.grpc_fut, self.respond_to_commands_fut);
-
-            let _ = results.0.unwrap();
-            results.1.unwrap();
+            todo!()
         }
 
         pub async fn assert_if_identical_packet_has_been_received_on_worker(
@@ -583,27 +570,11 @@ mod tests {
             client_id: i32,
             packet: MasterPacket,
         ) -> Self {
-            let client = self
-                .clients
-                .remove(&client_id)
-                .unwrap()
-                .assert_packet_received(packet)
-                .await;
-            self.clients.insert(client_id, client);
-
-            self
+            todo!()
         }
 
         pub async fn assert_no_more_packets_received_on_worker(mut self, client_id: i32) -> Self {
-            let client = self
-                .clients
-                .remove(&client_id)
-                .unwrap()
-                .assert_no_packets_received()
-                .await;
-            self.clients.insert(client_id, client);
-
-            self
+            todo!()
         }
 
         pub async fn connect_worker_and_register_it(
@@ -611,19 +582,7 @@ mod tests {
             client_id: i32,
             name: impl Into<String>,
         ) -> Self {
-            let name = name.into();
-
-            let request_packet = protobuf::worker::HelloCommand::new(name.clone());
-            let response_packet = protobuf::master::HelloCommandResponse::ok(name);
-
-            self.connect_new_client(client_id)
-                .await
-                .send_packet_to_master(client_id, request_packet.clone())
-                .await
-                .assert_if_identical_packet_has_been_received_on_master(request_packet)
-                .await
-                .assert_if_identical_packet_has_been_received_on_worker(client_id, response_packet)
-                .await
+            todo!()
         }
     }
 
